@@ -106,6 +106,9 @@
   .field label{display:block;font-size:12px;color:var(--text-dim);margin-bottom:7px;font-weight:500;}
   .field select, .field input{width:100%;background:var(--surface-2);border:1px solid var(--border-strong);color:var(--text);border-radius:8px;padding:11px 12px;font-size:14.5px;font-family:inherit;}
   .field select:focus, .field input:focus{outline:none;border-color:var(--yellow);}
+  .pw-field{position:relative;}
+  .pw-field input{padding-right:42px;}
+  .pw-toggle{position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;font-size:16px;cursor:pointer;color:var(--text-dim);padding:6px;line-height:1;}
   .field-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
 
   .type-toggle{display:flex;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:9px;padding:4px;gap:4px;}
@@ -193,6 +196,10 @@
   .badge-hidden{background:#3A2E12;color:var(--yellow);}
   .badge-soldout{background:#3A1717;color:#F3A19C;}
   .badge-live{background:var(--teal-dim);color:#8FE4D5;}
+  .badge-rented{background:#3A1717;color:#F3A19C;}
+  .badge-overdue{background:#5A1010;color:#FFB3AD;animation:pulse-badge 1.4s ease-in-out infinite;}
+  @keyframes pulse-badge{0%,100%{opacity:1;}50%{opacity:.55;}}
+  .badge-available{background:#123A28;color:#7EE2B8;}
 
   .avcard-fields{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px;}
   .avcard-fields.wide{grid-template-columns:repeat(2,1fr);}
@@ -488,6 +495,7 @@ async function syncFromSupabase(){
     sbSet('terms', { text: TERMS_TEXT, version: TERMS_VERSION });
   }
 
+  checkOverdueBookings();
   render();
 }
 
@@ -739,6 +747,39 @@ function hoursBetweenRaw(pDate, pTime, dDate, dTime){
   const end = new Date(dDate + 'T' + dTime);
   const ms = end - start;
   return ms > 0 ? ms / (3600 * 1000) : 0;
+}
+
+// Real-time fleet status: is this vehicle out on rent right now, and if so when is it due
+// (or overdue) back? Used by the admin Fleet tab and the overdue-vehicle popup checker.
+// Since the app has no explicit "returned" event, a vehicle is considered still out, from
+// its pickup time onward, until either its drop-off time or -- if that has passed -- until
+// a newer booking for the same vehicle starts (which implies it must have come back).
+function vehicleActiveBooking(vehicleId){
+  const now = new Date();
+  let latestStarted = null;
+  for(const bk of BOOKINGS){
+    if(bk.vehicleId !== vehicleId) continue;
+    const start = new Date(bk.pickupDate + 'T' + bk.pickupTime);
+    if(start > now) continue; // hasn't been picked up yet
+    if(!latestStarted || start > new Date(latestStarted.pickupDate + 'T' + latestStarted.pickupTime)){
+      latestStarted = bk;
+    }
+  }
+  return latestStarted;
+}
+
+function vehicleRentalStatus(vehicleId){
+  const bk = vehicleActiveBooking(vehicleId);
+  if(!bk) return { rented: false };
+  const now = new Date();
+  const end = new Date(bk.dropDate + 'T' + bk.dropTime);
+  return {
+    rented: true,
+    overdue: now > end,
+    booking: bk,
+    untilDate: bk.dropDate,
+    untilTime: bk.dropTime,
+  };
 }
 
 // Breaks total duration into Weekly + Daily + 12-Hour blocks per the business rules:
@@ -1011,6 +1052,17 @@ function todayStr(){
   const now = new Date();
   const pad = n => String(n).padStart(2,'0');
   return `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
+}
+
+// Lets the customer reveal a password field to check what they typed. Toggles the input's
+// type and swaps the eye icon; never changes the value itself.
+function togglePasswordField(inputId, btn){
+  const input = document.getElementById(inputId);
+  if(!input) return;
+  const showing = input.type === 'text';
+  input.type = showing ? 'password' : 'text';
+  btn.textContent = showing ? '👁' : '🙈';
+  btn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
 }
 
 function setDateTimeField(key, val){
@@ -1365,7 +1417,10 @@ function renderCustomerSignup(){
           </div>
           <div class="field">
             <label>Create a password</label>
-            <input type="password" value="${d.password}" oninput="customerDraft.password=this.value;saveCustomerDraft()" placeholder="At least 6 characters">
+            <div class="pw-field">
+              <input type="password" id="signup-pass-input" value="${d.password}" oninput="customerDraft.password=this.value;saveCustomerDraft()" placeholder="At least 6 characters">
+              <button type="button" class="pw-toggle" aria-label="Show password" onclick="togglePasswordField('signup-pass-input', this)">👁</button>
+            </div>
           </div>
         </div>
 
@@ -1519,7 +1574,10 @@ function renderCustomerLogin(){
         </div>
         <div class="field">
           <label>Password</label>
-          <input type="password" id="cust-pass" autocomplete="off">
+          <div class="pw-field">
+            <input type="password" id="cust-pass" autocomplete="off">
+            <button type="button" class="pw-toggle" aria-label="Show password" onclick="togglePasswordField('cust-pass', this)">👁</button>
+          </div>
         </div>
         <button class="btn-primary" onclick="customerLogin()">Log in</button>
         <div class="err" id="cust-login-err" style="display:none;">Incorrect Gmail address or password.</div>
@@ -1589,11 +1647,17 @@ function renderCustomerForgot(){
           <p class="sub-lead">Identity verified. Set a new password for ${d.email}.</p>
           <div class="field">
             <label>New password</label>
-            <input type="password" value="${d.newPass}" oninput="forgotDraft.newPass=this.value" placeholder="At least 6 characters">
+            <div class="pw-field">
+              <input type="password" id="forgot-newpass-input" value="${d.newPass}" oninput="forgotDraft.newPass=this.value" placeholder="At least 6 characters">
+              <button type="button" class="pw-toggle" aria-label="Show password" onclick="togglePasswordField('forgot-newpass-input', this)">👁</button>
+            </div>
           </div>
           <div class="field">
             <label>Confirm new password</label>
-            <input type="password" value="${d.confirmPass}" oninput="forgotDraft.confirmPass=this.value" placeholder="Re-enter password">
+            <div class="pw-field">
+              <input type="password" id="forgot-confirmpass-input" value="${d.confirmPass}" oninput="forgotDraft.confirmPass=this.value" placeholder="Re-enter password">
+              <button type="button" class="pw-toggle" aria-label="Show password" onclick="togglePasswordField('forgot-confirmpass-input', this)">👁</button>
+            </div>
           </div>
           <button class="btn-primary" onclick="forgotResetPassword()">Reset password &amp; log in</button>
           <div class="err" id="forgot-err" style="display:none;"></div>
@@ -1745,7 +1809,10 @@ function renderAdminLogin(){
         </div>
         <div class="field">
           <label>Password</label>
-          <input type="password" id="admin-pass" autocomplete="off">
+          <div class="pw-field">
+            <input type="password" id="admin-pass" autocomplete="off">
+            <button type="button" class="pw-toggle" aria-label="Show password" onclick="togglePasswordField('admin-pass', this)">👁</button>
+          </div>
         </div>
         <button class="btn-primary" onclick="adminLogin()">Sign in</button>
         <div class="err" id="admin-login-err" style="display:none;">Incorrect ID or password.</div>
@@ -1763,6 +1830,7 @@ function adminLogin(){
     try{ localStorage.setItem(ADMIN_SESSION_KEY, '1'); }catch(e){}
     requestAdminNotificationPermission();
     subscribeAdminRealtime();
+    checkOverdueBookings();
     goTo('admin');
   } else {
     document.getElementById('admin-login-err').style.display = 'block';
@@ -1781,6 +1849,7 @@ function restoreAdminSession(){
       state.isAdmin = true;
       requestAdminNotificationPermission();
       subscribeAdminRealtime();
+      checkOverdueBookings();
     }
   }catch(e){}
 }
@@ -1822,6 +1891,25 @@ function notifyIfNewCustomer(customer){
   if(!customer || !customer.id || notifiedCustomerIds.has(customer.id)) return;
   notifiedCustomerIds.add(customer.id);
   notifyAdmin('New customer signup', `${customer.name} just created a profile.`, 'admin');
+}
+
+// Popup alert when a vehicle isn't brought back on time. Fires once per booking (not
+// repeatedly every minute) and only for the booking that is still the vehicle's active
+// one -- i.e. it hasn't been superseded by a newer rental, which would imply it came back.
+const notifiedOverdueIds = new Set();
+function checkOverdueBookings(){
+  if(!state.isAdmin) return;
+  VEHICLES.forEach(v => {
+    const rs = vehicleRentalStatus(v.id);
+    if(rs.rented && rs.overdue && !notifiedOverdueIds.has(rs.booking.id)){
+      notifiedOverdueIds.add(rs.booking.id);
+      notifyAdmin(
+        'Vehicle not returned on time',
+        `${rs.booking.vehicleName} (Booking ${rs.booking.id}, ${rs.booking.customerName}) was due back ${fmtDate(rs.untilDate)} at ${fmtTime(rs.untilTime)}.`,
+        'admin'
+      );
+    }
+  });
 }
 
 // Cross-device alerts: as long as the admin has this app open (any tab, any device --
@@ -1954,7 +2042,7 @@ function renderAdmin(){
             ? `Version ${TERMS_VERSION} · shown to customers at booking and on the Terms page`
             : state.adminTab === 'payments'
             ? `Accepted: ${acceptedMethodsLabel()} · online gateway ${PAYMENT_SETTINGS.gatewayEnabled ? 'in setup' : 'not connected'}`
-            : `${VEHICLES.length} vehicles · ${VEHICLES.filter(v=>v.hidden).length} hidden · ${VEHICLES.filter(v=>v.soldOut).length} sold out`}</div>
+            : `${VEHICLES.length} vehicles · ${VEHICLES.filter(v=>v.hidden).length} hidden · ${VEHICLES.filter(v=>v.soldOut).length} sold out · ${VEHICLES.filter(v=>vehicleRentalStatus(v.id).rented).length} rented out now${VEHICLES.filter(v=>vehicleRentalStatus(v.id).overdue).length ? ` · ${VEHICLES.filter(v=>vehicleRentalStatus(v.id).overdue).length} overdue` : ''}`}</div>
         </div>
         <div style="display:flex;gap:8px;">
           ${state.adminTab === 'vehicles' ? `<button class="btn-ghost" onclick="toggleAddForm()">${newVehicleDraft ? 'Cancel' : '+ Add vehicle'}</button>
@@ -2071,6 +2159,13 @@ function renderAdmin(){
               <div class="status-badges">
                 ${v.hidden ? `<span class="badge badge-hidden">Hidden</span>` : `<span class="badge badge-live">Visible</span>`}
                 ${v.soldOut ? `<span class="badge badge-soldout">Sold out</span>` : ''}
+                ${(() => {
+                  const rs = vehicleRentalStatus(v.id);
+                  if(!rs.rented) return `<span class="badge badge-available">Available now</span>`;
+                  return rs.overdue
+                    ? `<span class="badge badge-overdue">⚠ Overdue · was due ${fmtDate(rs.untilDate)}, ${fmtTime(rs.untilTime)}</span>`
+                    : `<span class="badge badge-rented">Rented · back ${fmtDate(rs.untilDate)}, ${fmtTime(rs.untilTime)}</span>`;
+                })()}
               </div>
               <label class="photo-upload-label">
                 ${v.photo ? 'Change photo' : 'Upload photo'}
@@ -2424,8 +2519,10 @@ function bookingsListInnerHtml(){
         ${bk.customerMobile ? `<button class="btn-ghost" style="background:var(--whatsapp);color:#fff;border-color:var(--whatsapp);" onclick="shareBookingOnWhatsapp('${bk.id}')">💬 Share on WhatsApp</button>` : ''}
         <button class="btn-ghost" onclick="sendCustomerNotification('${bk.id}','return')">🔔 Remind to return</button>
         <button class="btn-ghost" onclick="sendCustomerNotification('${bk.id}','extension')">📅 Ask about extension</button>
+        <button class="btn-ghost" style="background:var(--teal);color:#0B1615;border-color:var(--teal);" onclick="toggleExtendForm('${bk.id}')">🕒 ${extendDraft && extendDraft.bookingId===bk.id ? 'Cancel extend' : 'Extend rental'}</button>
         <button class="btn-ghost" style="color:#F3A19C;border-color:#5A2A26;" onclick="deleteBooking('${bk.id}')">🗑 Delete booking</button>
       </div>
+      ${extendDraft && extendDraft.bookingId === bk.id ? renderExtendFormHtml(bk) : ''}
     </div>
   `).join('');
 }
@@ -2590,6 +2687,143 @@ function saveNewBooking(){
   newBookingDraft = null;
   renderAdmin();
   if(shouldShare){ shareBookingOnWhatsapp(booking.id); }
+}
+
+/* ============ EXTEND BOOKING ============
+   Lets admin push a customer's drop-off date/time forward directly, add an optional
+   extension charge, and send them a WhatsApp + in-app confirmation of the new return time. */
+let extendDraft = null;
+
+function addDaysToDateStr(dateStr, days){
+  const d = new Date(dateStr + 'T00:00:00');
+  d.setDate(d.getDate() + days);
+  const pad = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+}
+
+function toggleExtendForm(bookingId){
+  if(extendDraft && extendDraft.bookingId === bookingId){
+    extendDraft = null;
+  } else {
+    const bk = BOOKINGS.find(x => x.id === bookingId);
+    if(!bk) return;
+    extendDraft = {
+      bookingId,
+      newDropDate: addDaysToDateStr(bk.dropDate, 1),
+      newDropTime: bk.dropTime,
+      charge: 0,
+      shareOnWhatsapp: true,
+    };
+  }
+  renderAdmin();
+}
+
+function updateExtendDraftField(field, val){
+  if(field === 'charge'){
+    const n = parseFloat(val);
+    extendDraft.charge = isNaN(n) || n < 0 ? 0 : n;
+  } else {
+    extendDraft[field] = val;
+  }
+  renderAdmin();
+}
+
+function quickExtendDays(days){
+  const bk = BOOKINGS.find(x => x.id === extendDraft.bookingId);
+  if(!bk) return;
+  extendDraft.newDropDate = addDaysToDateStr(bk.dropDate, days);
+  extendDraft.newDropTime = bk.dropTime;
+  renderAdmin();
+}
+
+function renderExtendFormHtml(bk){
+  const d = extendDraft;
+  const newHours = hoursBetweenRaw(bk.pickupDate, bk.pickupTime, d.newDropDate, d.newDropTime);
+  const vehicle = VEHICLES.find(v => v.id === bk.vehicleId);
+  const dailyRateHint = vehicle ? `Reference: this vehicle's 150 km/day rate is ${money(vehicle.rate[150])}/day.` : '';
+  return `
+    <div class="add-card" style="margin-top:10px;">
+      <h3>Extend booking ${bk.id}</h3>
+      <p class="field-hint" style="margin-bottom:10px;">Current drop-off: ${fmtDate(bk.dropDate)}, ${fmtTime(bk.dropTime)}</p>
+      <div class="doceditor-row" style="margin-bottom:10px;">
+        <button onclick="quickExtendDays(1)">+1 day</button>
+        <button onclick="quickExtendDays(2)">+2 days</button>
+        <button onclick="quickExtendDays(7)">+1 week</button>
+      </div>
+      <div class="avcard-fields wide" style="margin-bottom:8px;">
+        <div class="field">
+          <label>New drop-off date</label>
+          <input type="date" min="${bk.dropDate}" value="${d.newDropDate}" onchange="updateExtendDraftField('newDropDate', this.value)">
+        </div>
+        <div class="field">
+          <label>New drop-off time</label>
+          <input type="time" value="${d.newDropTime}" onchange="updateExtendDraftField('newDropTime', this.value)">
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:8px;">
+        <label>Extension charge (₹)</label>
+        <input type="number" min="0" value="${d.charge}" onchange="updateExtendDraftField('charge', this.value)">
+        ${dailyRateHint ? `<p class="field-hint">${dailyRateHint}</p>` : ''}
+      </div>
+      ${newHours > 0 ? `<div class="note-box" style="margin-bottom:8px;">New total duration: <strong>${durationLabel(newHours)}</strong> · Extension charge: <strong>${money(d.charge)}</strong> · New rental total: <strong>${money(bk.rentalTotal + d.charge)}</strong></div>`
+        : `<div class="err" style="display:block;margin-bottom:8px;">New drop-off must be after the current pickup.</div>`}
+      <label style="display:flex;align-items:center;gap:8px;margin:4px 0 10px;font-size:12.5px;color:var(--text-dim);cursor:pointer;">
+        <input type="checkbox" ${d.shareOnWhatsapp ? 'checked' : ''} onchange="extendDraft.shareOnWhatsapp=this.checked">
+        Send extension confirmation on customer's WhatsApp + in-app notification
+      </label>
+      <div style="display:flex;gap:8px;">
+        <button class="btn-primary" onclick="saveExtension()">Confirm extension</button>
+        <button class="btn-ghost" onclick="toggleExtendForm('${bk.id}')">Cancel</button>
+      </div>
+    </div>
+  `;
+}
+
+function saveExtension(){
+  const d = extendDraft;
+  const bk = BOOKINGS.find(x => x.id === d.bookingId);
+  if(!bk) return;
+  const newHours = hoursBetweenRaw(bk.pickupDate, bk.pickupTime, d.newDropDate, d.newDropTime);
+  if(newHours <= 0){ alert('New drop-off must be after the current pickup date/time.'); return; }
+
+  const oldDropDate = bk.dropDate, oldDropTime = bk.dropTime;
+  bk.extensions = bk.extensions || [];
+  bk.extensions.push({
+    fromDate: oldDropDate, fromTime: oldDropTime,
+    toDate: d.newDropDate, toTime: d.newDropTime,
+    charge: d.charge,
+    extendedAt: new Date().toISOString(),
+  });
+  bk.dropDate = d.newDropDate;
+  bk.dropTime = d.newDropTime;
+  bk.durationLabel = durationLabel(newHours);
+  bk.rentalTotal = bk.rentalTotal + d.charge;
+  bk.modifiedAt = new Date().toISOString();
+  saveBookings();
+
+  // In-app notification, same store the return/extension reminder buttons use.
+  const notif = {
+    id: 'NT' + Date.now() + Math.floor(Math.random() * 1000),
+    bookingId: bk.id,
+    customerId: bk.customerId,
+    type: 'extension_confirmed',
+    title: 'Your rental has been extended',
+    body: `Hi ${bk.customerName}, your rental of the ${bk.vehicleName} (Booking ${bk.id}) has been extended to ${fmtDate(bk.dropDate)} at ${fmtTime(bk.dropTime)}.${d.charge ? ` Extension charge: ${money(d.charge)}.` : ''}`,
+    createdAt: new Date().toISOString(),
+    read: false,
+  };
+  NOTIFICATIONS.push(notif);
+  saveNotifications();
+
+  const shouldShare = d.shareOnWhatsapp;
+  extendDraft = null;
+  renderAdmin();
+
+  if(shouldShare && bk.customerMobile){
+    const num = bk.customerMobile.replace(/\D/g, '');
+    const waMsg = `*24x7 Bike4U Bike Rentals*\n${notif.title}\n\n${notif.body}\n\nOriginal drop-off was ${fmtDate(oldDropDate)}, ${fmtTime(oldDropTime)}.`;
+    window.open(`https://wa.me/91${num}?text=${encodeURIComponent(waMsg)}`, '_blank');
+  }
 }
 
 function renderTermsAdminHtml(){
@@ -3521,6 +3755,14 @@ function render(){
   }
   render();
   syncFromSupabase();
+
+  // Keep the admin Fleet view's "Rented until.../Available now" badges accurate even
+  // when nothing else changes -- a vehicle becomes free purely because time passed, not
+  // because any booking record was edited, so a periodic re-render is needed to catch it.
+  setInterval(() => {
+    checkOverdueBookings();
+    if(state.isAdmin && state.page === 'admin' && state.adminTab === 'vehicles') render();
+  }, 60000);
 })();
 </script>
 
