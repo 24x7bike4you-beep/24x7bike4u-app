@@ -626,6 +626,8 @@ let state = {
   agreedTerms: false,
   showTerms: false,
   returnToReviewAfterAuth: false,
+  customerSearch: '',
+  bookingSearch: '',
 };
 
 const CUSTOMER_SESSION_KEY = 'bike4u_customer_session_v1';
@@ -712,6 +714,43 @@ function billingBreakdown(v){
     // A leftover of 12 hours or less after full day(s)/week(s) always adds the vehicle's
     // one 12-hour/80km rate on top -- that's the only 12-hour rate that exists, regardless
     // of which km plan was chosen for the full-day portion.
+    total = plan.weeks * v.weekly + plan.days * v.rate[km] + (plan.remainderHours > 0 ? halfDayRate(v) : 0);
+    includedKm = plan.weeks * 700 + plan.days * km + (plan.remainderHours > 0 ? 80 : 0);
+  }
+  return { ...plan, total, includedKm };
+}
+
+// Same plan/billing math as getPlan()/billingBreakdown(), but parameterized on explicit
+// dates/vehicle instead of the live search state -- used by the admin's manual booking
+// form so it can preview pricing without touching the customer-facing search state.
+function planForDates(pDate, pTime, dDate, dTime){
+  const totalHours = hoursBetweenRaw(pDate, pTime, dDate, dTime);
+  if(totalHours <= 0){
+    return { totalHours: 0, weeks: 0, days: 0, remainderHours: 0, isPureShort: false, isPureWeekly: false, kmOptions: [120, 150, 200] };
+  }
+  const HOURS_WEEK = 24 * 7;
+  const weeks = Math.floor(totalHours / HOURS_WEEK);
+  let rem = totalHours - weeks * HOURS_WEEK;
+  let days = Math.floor(rem / 24);
+  let remainderHours = rem - days * 24;
+  if(remainderHours > 12){
+    days += 1;
+    remainderHours = 0;
+  }
+  const isPureShort = (weeks === 0 && days === 0 && remainderHours > 0);
+  const isPureWeekly = (weeks > 0 && days === 0 && remainderHours === 0);
+  const kmOptions = isPureShort ? [80, 120, 150, 200] : [120, 150, 200];
+  return { totalHours, weeks, days, remainderHours, isPureShort, isPureWeekly, kmOptions };
+}
+
+function billingFor(v, pDate, pTime, dDate, dTime, km){
+  const plan = planForDates(pDate, pTime, dDate, dTime);
+  if(plan.totalHours <= 0) return { ...plan, total: 0, includedKm: 0 };
+  let total, includedKm;
+  if(plan.isPureShort){
+    total = (km === 80) ? v.half80 : v.rate[km];
+    includedKm = km;
+  } else {
     total = plan.weeks * v.weekly + plan.days * v.rate[km] + (plan.remainderHours > 0 ? halfDayRate(v) : 0);
     includedKm = plan.weeks * 700 + plan.days * km + (plan.remainderHours > 0 ? 80 : 0);
   }
@@ -1067,7 +1106,7 @@ function confirmBookingAndSend(){
   };
   BOOKINGS.push(booking);
   saveBookings();
-  notifyAdmin('New booking', `${booking.customerName} booked ${booking.vehicleName}.`);
+  notifyIfNewBooking(booking);
 
   bookOnWhatsapp(booking);
 
@@ -1293,7 +1332,7 @@ function submitCustomerSignup(){
   };
   CUSTOMERS.push(customer);
   saveCustomers();
-  notifyAdmin('New customer signup', `${customer.name} just created a profile.`);
+  notifyIfNewCustomer(customer);
   state.currentCustomer = customer;
   try{ localStorage.setItem(CUSTOMER_SESSION_KEY, customer.email); }catch(e){}
   customerDraft = blankCustomerDraft();
@@ -1444,6 +1483,7 @@ function adminLogin(){
     state.isAdmin = true;
     try{ localStorage.setItem(ADMIN_SESSION_KEY, '1'); }catch(e){}
     requestAdminNotificationPermission();
+    subscribeAdminRealtime();
     goTo('admin');
   } else {
     document.getElementById('admin-login-err').style.display = 'block';
@@ -1461,6 +1501,7 @@ function restoreAdminSession(){
     if(localStorage.getItem(ADMIN_SESSION_KEY) === '1'){
       state.isAdmin = true;
       requestAdminNotificationPermission();
+      subscribeAdminRealtime();
     }
   }catch(e){}
 }
@@ -1472,12 +1513,77 @@ function requestAdminNotificationPermission(){
   }
 }
 
-function notifyAdmin(title, body){
+// Tracks ids we've already alerted on, so the same booking/signup never notifies twice
+// (once from the tab that created it, once from the realtime echo of that same change).
+const notifiedBookingIds = new Set();
+const notifiedCustomerIds = new Set();
+
+function notifyAdmin(title, body, onClickGoTo){
   if(typeof Notification === 'undefined') return;
   if(Notification.permission !== 'granted') return;
   try{
-    new Notification(title, { body, icon: LOGO_BASE64 });
+    const n = new Notification(title, { body, icon: LOGO_BASE64 });
+    if(onClickGoTo){
+      n.onclick = function(){
+        try{ window.focus(); }catch(e){}
+        if(state.isAdmin){ goTo(onClickGoTo); }
+        n.close();
+      };
+    }
   }catch(e){}
+}
+
+function notifyIfNewBooking(booking){
+  if(!booking || !booking.id || notifiedBookingIds.has(booking.id)) return;
+  notifiedBookingIds.add(booking.id);
+  notifyAdmin('New booking', `${booking.customerName} booked ${booking.vehicleName}.`, 'admin');
+}
+
+function notifyIfNewCustomer(customer){
+  if(!customer || !customer.id || notifiedCustomerIds.has(customer.id)) return;
+  notifiedCustomerIds.add(customer.id);
+  notifyAdmin('New customer signup', `${customer.name} just created a profile.`, 'admin');
+}
+
+// Cross-device alerts: as long as the admin has this app open (any tab, any device --
+// phone or computer), Supabase Realtime pushes every bookings/customers change straight
+// to this tab, so a booking or signup made on a *different* device still triggers a
+// notification here. Requires realtime to be enabled for the 'app_data' table in the
+// Supabase dashboard (Database -> Replication).
+let adminRealtimeChannel = null;
+async function subscribeAdminRealtime(){
+  if(adminRealtimeChannel) return;
+  const client = await getSupabase();
+  if(!client) return;
+  try{
+    adminRealtimeChannel = client
+      .channel('admin-notifications')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_data', filter: 'key=eq.bookings' }, (payload) => {
+        const arr = payload && payload.new && payload.new.value;
+        if(!Array.isArray(arr)) return;
+        const existingIds = new Set(BOOKINGS.map(b => b.id));
+        const freshOnes = arr.filter(b => !existingIds.has(b.id));
+        if(freshOnes.length){
+          BOOKINGS = arr;
+          try{ localStorage.setItem(BOOKINGS_STORAGE_KEY, JSON.stringify(BOOKINGS)); }catch(e){}
+          freshOnes.forEach(notifyIfNewBooking);
+          if(state.isAdmin && state.page === 'admin') render();
+        }
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_data', filter: 'key=eq.customers' }, (payload) => {
+        const arr = payload && payload.new && payload.new.value;
+        if(!Array.isArray(arr)) return;
+        const existingIds = new Set(CUSTOMERS.map(c => c.id));
+        const freshOnes = arr.filter(c => !existingIds.has(c.id));
+        if(freshOnes.length){
+          CUSTOMERS = arr;
+          try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
+          freshOnes.forEach(notifyIfNewCustomer);
+          if(state.isAdmin && state.page === 'admin') render();
+        }
+      })
+      .subscribe();
+  }catch(e){ console.warn('Bike4u: could not subscribe to realtime admin notifications:', e); }
 }
 
 /* ============ ADMIN: PANEL ============ */
@@ -1502,9 +1608,17 @@ function renderAdmin(){
         <div style="display:flex;gap:8px;">
           ${state.adminTab === 'vehicles' ? `<button class="btn-ghost" onclick="toggleAddForm()">${newVehicleDraft ? 'Cancel' : '+ Add vehicle'}</button>
           <button class="btn-ghost" onclick="resetFleetToDefaults()">Reset to defaults</button>` : ''}
+          ${state.adminTab === 'customers' ? `<button class="btn-ghost" onclick="toggleAddCustomerForm()">${newCustomerDraft ? 'Cancel' : '+ Add customer'}</button>` : ''}
+          ${state.adminTab === 'bookings' ? `<button class="btn-ghost" onclick="toggleNewBookingForm()">${newBookingDraft ? 'Cancel' : '+ New booking'}</button>` : ''}
           <button class="btn-ghost" onclick="adminLogout()">Log out</button>
         </div>
       </div>
+
+      ${(typeof Notification !== 'undefined' && Notification.permission !== 'granted') ? `
+      <div class="note-box" style="border-color:var(--red);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+        <span>🔔 Notifications are ${Notification.permission === 'denied' ? 'blocked' : 'off'} in this browser, so you won't get alerts here for new bookings or signups${Notification.permission === 'denied' ? ' — allow them in your browser/site settings' : ''}.</span>
+        ${Notification.permission === 'default' ? `<button class="btn-ghost" onclick="requestAdminNotificationPermission();renderAdmin();">Enable notifications</button>` : ''}
+      </div>` : ''}
 
       <div class="tab-switch">
         <button class="${state.adminTab === 'vehicles' ? 'active' : ''}" onclick="setAdminTab('vehicles')">Vehicles</button>
@@ -1659,10 +1773,38 @@ function renderAdmin(){
 }
 
 function renderCustomersAdminHtml(){
+  return `
+    <div class="add-card" style="margin-bottom:14px;">
+      <div class="field" style="margin-bottom:0;">
+        <label>Search</label>
+        <input type="text" id="customer-search-input" placeholder="Search by name, phone or email…" value="${state.customerSearch || ''}" oninput="onCustomerSearchInput(this.value)">
+      </div>
+    </div>
+    ${newCustomerDraft ? renderNewCustomerFormHtml() : ''}
+    <div id="customers-list-results">${customersListInnerHtml()}</div>
+  `;
+}
+
+function onCustomerSearchInput(val){
+  state.customerSearch = val;
+  const el = document.getElementById('customers-list-results');
+  if(el) el.innerHTML = customersListInnerHtml();
+}
+
+function customersListInnerHtml(){
   if(CUSTOMERS.length === 0){
-    return `<div class="empty"><h3>No customer signups yet</h3><p>Customer profiles will appear here once they sign up.</p></div>`;
+    return `<div class="empty"><h3>No customer signups yet</h3><p>Customer profiles will appear here once they sign up, or add one manually above.</p></div>`;
   }
-  return CUSTOMERS.map(c => `
+  const q = (state.customerSearch || '').trim().toLowerCase();
+  const filtered = !q ? CUSTOMERS : CUSTOMERS.filter(c =>
+    (c.name || '').toLowerCase().includes(q) ||
+    (c.mobile || '').toLowerCase().includes(q) ||
+    (c.email || '').toLowerCase().includes(q)
+  );
+  if(filtered.length === 0){
+    return `<div class="empty"><h3>No matching customers</h3><p>Try a different name, phone number or email.</p></div>`;
+  }
+  return filtered.map(c => `
     <div class="ccard">
       <div class="ccard-top">
         <div style="flex:1;min-width:0;">
@@ -1684,16 +1826,20 @@ function renderCustomersAdminHtml(){
             <label>Address</label>
             <input type="text" value="${c.address}" onchange="updateCustomerField('${c.id}','address',this.value)">
           </div>
-          <div class="ccard-meta">${c.email}<br>Signed up: ${fmtDate(c.createdAt.slice(0,10))}</div>
+          <div class="mini-field" style="margin-bottom:8px;">
+            <label>Email</label>
+            <input type="email" value="${c.email || ''}" onchange="updateCustomerField('${c.id}','email',this.value)">
+          </div>
+          <div class="ccard-meta">Signed up: ${fmtDate(c.createdAt.slice(0,10))}${c.addedByAdmin ? ' · Added by admin' : ''}</div>
         </div>
         ${statusPillHtml(c)}
       </div>
       <div class="ccard-docs">
         ${DOC_FIELDS.map(f => `
           <div style="display:flex;flex-direction:column;gap:4px;">
-            <div class="doc-thumb"><img src="${c[f.key]}" alt="${f.label}" title="${f.label}"></div>
+            <div class="doc-thumb">${c[f.key] ? `<img src="${c[f.key]}" alt="${f.label}" title="${f.label}">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;text-align:center;font-size:9px;line-height:1.3;color:var(--text-faint);padding:4px;">${f.label}<br>Not added</div>`}</div>
             <label style="font-size:9.5px;color:var(--yellow);text-align:center;cursor:pointer;">
-              Replace
+              ${c[f.key] ? 'Replace' : 'Add'}
               <input type="file" accept="image/*" style="display:none;" onchange="adminReplaceCustomerDoc('${c.id}','${f.key}', this)">
             </label>
           </div>
@@ -1708,20 +1854,129 @@ function renderCustomersAdminHtml(){
   `).join('');
 }
 
+function blankNewCustomerDraft(){
+  return { name: '', mobile: '', emergency: '', email: '', address: '' };
+}
+let newCustomerDraft = null;
+function toggleAddCustomerForm(){
+  newCustomerDraft = newCustomerDraft ? null : blankNewCustomerDraft();
+  renderAdmin();
+}
+function renderNewCustomerFormHtml(){
+  const d = newCustomerDraft;
+  return `
+    <div class="add-card" style="margin-bottom:14px;">
+      <h3>Add customer</h3>
+      <p class="field-hint" style="margin-bottom:14px;">Create a profile for a walk-in or phone customer. KYC documents and a login email/password can be added later from their card below.</p>
+      <div class="avcard-fields wide" style="margin-bottom:8px;">
+        <div class="field">
+          <label>Full name *</label>
+          <input type="text" value="${d.name}" oninput="newCustomerDraft.name=this.value" placeholder="As per ID">
+        </div>
+        <div class="field">
+          <label>Mobile *</label>
+          <input type="tel" value="${d.mobile}" oninput="newCustomerDraft.mobile=this.value" placeholder="10-digit number">
+        </div>
+      </div>
+      <div class="avcard-fields wide" style="margin-bottom:8px;">
+        <div class="field">
+          <label>Emergency contact</label>
+          <input type="tel" value="${d.emergency}" oninput="newCustomerDraft.emergency=this.value" placeholder="Optional">
+        </div>
+        <div class="field">
+          <label>Email</label>
+          <input type="email" value="${d.email}" oninput="newCustomerDraft.email=this.value" placeholder="Optional">
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:8px;">
+        <label>Address</label>
+        <input type="text" value="${d.address}" oninput="newCustomerDraft.address=this.value" placeholder="Optional">
+      </div>
+      <div class="err" id="new-customer-err" style="display:none;"></div>
+      <div style="display:flex;gap:8px;margin-top:10px;">
+        <button class="btn-primary" onclick="saveNewCustomerManually()">Save customer</button>
+        <button class="btn-ghost" onclick="toggleAddCustomerForm()">Cancel</button>
+      </div>
+    </div>
+  `;
+}
+function saveNewCustomerManually(){
+  const d = newCustomerDraft;
+  const errEl = document.getElementById('new-customer-err');
+  const showErr = msg => { errEl.textContent = msg; errEl.style.display = 'block'; };
+
+  if(!d.name.trim()){ showErr("Please enter the customer's full name."); return; }
+  const mobile = d.mobile.trim();
+  if(!/^\d{10}$/.test(mobile)){ showErr('Please enter a valid 10-digit mobile number.'); return; }
+  if(CUSTOMERS.some(c => c.mobile === mobile)){ showErr('A customer with this mobile number already exists.'); return; }
+  const emergency = d.emergency.trim();
+  if(emergency && !/^\d{10}$/.test(emergency)){ showErr('Emergency contact must be a valid 10-digit number.'); return; }
+  if(emergency && emergency === mobile){ showErr('Emergency contact number must be different from the mobile number.'); return; }
+  const email = d.email.trim().toLowerCase();
+  if(email && CUSTOMERS.some(c => c.email === email)){ showErr('A customer with this email already exists.'); return; }
+
+  const maxNum = CUSTOMERS.reduce((m,c) => Math.max(m, parseInt((c.id||'C0').replace('C',''),10) || 0), 0);
+  const customer = {
+    id: 'C' + (maxNum + 1),
+    email, password: '',
+    name: d.name.trim(),
+    mobile, emergency,
+    address: d.address.trim(),
+    selfie: null, aadharFront: null, aadharBack: null, licenseFront: null, licenseBack: null,
+    createdAt: new Date().toISOString(),
+    verificationStatus: 'pending',
+    addedByAdmin: true,
+  };
+  CUSTOMERS.push(customer);
+  saveCustomers();
+  notifiedCustomerIds.add(customer.id); // this device created it -- no local popup needed
+  newCustomerDraft = null;
+  renderAdmin();
+}
+
 function renderBookingsAdminHtml(){
+  return `
+    <div class="add-card" style="margin-bottom:14px;">
+      <div class="field" style="margin-bottom:0;">
+        <label>Search</label>
+        <input type="text" id="booking-search-input" placeholder="Search by name, phone, email or booking ID…" value="${state.bookingSearch || ''}" oninput="onBookingSearchInput(this.value)">
+      </div>
+    </div>
+    ${newBookingDraft ? renderNewBookingFormHtml() : ''}
+    <div id="bookings-list-results">${bookingsListInnerHtml()}</div>
+  `;
+}
+
+function onBookingSearchInput(val){
+  state.bookingSearch = val;
+  const el = document.getElementById('bookings-list-results');
+  if(el) el.innerHTML = bookingsListInnerHtml();
+}
+
+function bookingsListInnerHtml(){
   if(BOOKINGS.length === 0){
-    return `<div class="empty"><h3>No bookings yet</h3><p>Every confirmed booking's signed agreement will appear here, downloadable as a PDF.</p></div>`;
+    return `<div class="empty"><h3>No bookings yet</h3><p>Every confirmed booking's signed agreement will appear here, downloadable as a PDF, or add one manually above.</p></div>`;
   }
   const sorted = [...BOOKINGS].sort((a,b) => new Date(b.agreedAt) - new Date(a.agreedAt));
-  return sorted.map(bk => `
+  const q = (state.bookingSearch || '').trim().toLowerCase();
+  const filtered = !q ? sorted : sorted.filter(bk =>
+    (bk.customerName || '').toLowerCase().includes(q) ||
+    (bk.customerMobile || '').toLowerCase().includes(q) ||
+    (bk.customerEmail || '').toLowerCase().includes(q) ||
+    (bk.id || '').toLowerCase().includes(q)
+  );
+  if(filtered.length === 0){
+    return `<div class="empty"><h3>No matching bookings</h3><p>Try a different name, phone number, email or booking ID.</p></div>`;
+  }
+  return filtered.map(bk => `
     <div class="ccard">
       <div class="ccard-top">
         <div style="flex:1;min-width:0;">
           <div class="ccard-name">${bk.vehicleName} <span style="color:var(--text-dim);font-weight:500;font-size:12.5px;">— ${bk.id}</span></div>
           <div class="ccard-meta" style="margin-bottom:10px;">
-            Customer: ${bk.customerName} (${bk.customerEmail})<br>
+            Customer: ${bk.customerName} (${bk.customerEmail || bk.customerMobile})<br>
             Agreed on: ${fmtDate(bk.agreedAt.slice(0,10))} ${fmtTime(bk.agreedAt.slice(11,16))}${bk.modifiedAt ? ` · Last modified: ${fmtDate(bk.modifiedAt.slice(0,10))} ${fmtTime(bk.modifiedAt.slice(11,16))}` : ''}<br>
-            IP at booking: ${bk.customerIp || 'Not recorded'}
+            IP at booking: ${bk.customerIp || 'Not recorded'}${bk.addedByAdmin ? ' · Added by admin' : ''}
           </div>
 
           <div class="avcard-fields wide" style="margin-bottom:8px;">
@@ -1772,6 +2027,127 @@ function renderBookingsAdminHtml(){
       </div>
     </div>
   `).join('');
+}
+
+function blankNewBookingDraft(){
+  return { customerId: '', vehicleId: '', pickupDate: '', pickupTime: '10:00', dropDate: '', dropTime: '10:00', kmPackage: 150 };
+}
+let newBookingDraft = null;
+function toggleNewBookingForm(){
+  newBookingDraft = newBookingDraft ? null : blankNewBookingDraft();
+  renderAdmin();
+}
+function updateNewBookingDraftField(field, val){
+  newBookingDraft[field] = (field === 'kmPackage') ? parseInt(val, 10) : val;
+  renderAdmin();
+}
+function renderNewBookingFormHtml(){
+  const d = newBookingDraft;
+  const customerOptions = CUSTOMERS.map(c => `<option value="${c.id}" ${d.customerId===c.id?'selected':''}>${c.name} — ${c.mobile}</option>`).join('');
+  const vehicleOptions = VEHICLES.map(v => `<option value="${v.id}" ${d.vehicleId===v.id?'selected':''}>${v.name} (${v.colour})${v.soldOut?' — Sold out':v.hidden?' — Hidden':''}</option>`).join('');
+  const vehicle = VEHICLES.find(v => v.id === d.vehicleId);
+  const plan = planForDates(d.pickupDate, d.pickupTime, d.dropDate, d.dropTime);
+  const kmOptions = plan.kmOptions;
+  if(!kmOptions.includes(d.kmPackage)){ d.kmPackage = kmOptions.includes(150) ? 150 : kmOptions[0]; }
+  const billing = vehicle ? billingFor(vehicle, d.pickupDate, d.pickupTime, d.dropDate, d.dropTime, d.kmPackage) : null;
+
+  return `
+    <div class="add-card" style="margin-bottom:14px;">
+      <h3>New manual booking</h3>
+      <p class="field-hint" style="margin-bottom:14px;">Book a registered customer into a vehicle yourself — for phone bookings or walk-ins.</p>
+      ${CUSTOMERS.length === 0 ? `<div class="err" style="display:block;margin-bottom:10px;">No registered customers yet — add one first.</div>` : ''}
+      <div class="field" style="margin-bottom:8px;">
+        <label>Customer *</label>
+        <select onchange="updateNewBookingDraftField('customerId', this.value)">
+          <option value="">Select a customer…</option>
+          ${customerOptions}
+        </select>
+      </div>
+      <div class="field" style="margin-bottom:8px;">
+        <label>Vehicle *</label>
+        <select onchange="updateNewBookingDraftField('vehicleId', this.value)">
+          <option value="">Select a vehicle…</option>
+          ${vehicleOptions}
+        </select>
+      </div>
+      <div class="avcard-fields wide" style="margin-bottom:8px;">
+        <div class="field">
+          <label>Pickup date *</label>
+          <input type="date" value="${d.pickupDate}" onchange="updateNewBookingDraftField('pickupDate', this.value)">
+        </div>
+        <div class="field">
+          <label>Pickup time *</label>
+          <input type="time" value="${d.pickupTime}" onchange="updateNewBookingDraftField('pickupTime', this.value)">
+        </div>
+        <div class="field">
+          <label>Drop-off date *</label>
+          <input type="date" value="${d.dropDate}" onchange="updateNewBookingDraftField('dropDate', this.value)">
+        </div>
+        <div class="field">
+          <label>Drop-off time *</label>
+          <input type="time" value="${d.dropTime}" onchange="updateNewBookingDraftField('dropTime', this.value)">
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:8px;">
+        <label>Kilometre plan</label>
+        <select onchange="updateNewBookingDraftField('kmPackage', this.value)">
+          ${kmOptions.map(k => `<option value="${k}" ${d.kmPackage===k?'selected':''}>${k} km${plan.isPureShort && k===80 ? '' : '/day'}</option>`).join('')}
+        </select>
+      </div>
+      ${billing && billing.totalHours > 0 ? `
+      <div class="note-box" style="margin-bottom:8px;">
+        Duration: <strong>${durationLabel(billing.totalHours)}</strong> · Rent: <strong>${money(billing.total)}</strong> · Deposit: <strong>${money(vehicle.deposit)}</strong> · Extra km: <strong>₹${vehicle.extraKm}/km</strong>
+      </div>` : `<div class="field-hint" style="margin-bottom:8px;">Pick a vehicle and valid pickup/drop-off dates to see the price.</div>`}
+      <div class="err" id="new-booking-err" style="display:none;"></div>
+      <div style="display:flex;gap:8px;margin-top:10px;">
+        <button class="btn-primary" onclick="saveNewBooking()">Save booking</button>
+        <button class="btn-ghost" onclick="toggleNewBookingForm()">Cancel</button>
+      </div>
+    </div>
+  `;
+}
+function saveNewBooking(){
+  const d = newBookingDraft;
+  const errEl = document.getElementById('new-booking-err');
+  const showErr = msg => { errEl.textContent = msg; errEl.style.display = 'block'; };
+
+  const customer = CUSTOMERS.find(c => c.id === d.customerId);
+  const vehicle = VEHICLES.find(v => v.id === d.vehicleId);
+  if(!customer){ showErr('Please select a customer.'); return; }
+  if(!vehicle){ showErr('Please select a vehicle.'); return; }
+  const plan = planForDates(d.pickupDate, d.pickupTime, d.dropDate, d.dropTime);
+  if(plan.totalHours <= 0){ showErr('Please enter a valid pickup and drop-off date/time (drop-off must be after pickup).'); return; }
+  const billing = billingFor(vehicle, d.pickupDate, d.pickupTime, d.dropDate, d.dropTime, d.kmPackage);
+
+  const maxNum = BOOKINGS.reduce((m,bk) => Math.max(m, parseInt((bk.id||'BK0').replace('BK',''),10) || 0), 0);
+  const booking = {
+    id: 'BK' + (maxNum + 1),
+    customerId: customer.id,
+    customerName: customer.name,
+    customerEmail: customer.email,
+    customerMobile: customer.mobile,
+    vehicleId: vehicle.id,
+    vehicleName: vehicle.name,
+    vehicleColour: vehicle.colour,
+    vehicleRc: vehicle.rc,
+    pickupDate: d.pickupDate, pickupTime: d.pickupTime,
+    dropDate: d.dropDate, dropTime: d.dropTime,
+    durationLabel: durationLabel(billing.totalHours),
+    kmLabel: billing.isPureWeekly ? `${billing.includedKm} km included (700 km/week)` : `${d.kmPackage} km${kmUnit(billing, d.kmPackage)} · ${billing.includedKm} km included`,
+    rentalTotal: billing.total,
+    deposit: vehicle.deposit,
+    extraKmCharge: vehicle.extraKm,
+    paymentMethod: 'Cash / UPI / Card (collected at pickup/drop-off)',
+    termsVersion: TERMS_VERSION,
+    agreedAt: new Date().toISOString(),
+    customerIp: 'Added by admin',
+    addedByAdmin: true,
+  };
+  BOOKINGS.push(booking);
+  saveBookings();
+  notifiedBookingIds.add(booking.id); // this device created it -- no local popup needed
+  newBookingDraft = null;
+  renderAdmin();
 }
 
 function renderTermsAdminHtml(){
@@ -2099,6 +2475,16 @@ function updateCustomerField(id, field, val){
       renderAdmin();
       return;
     }
+  } else if(field === 'email'){
+    if(v && CUSTOMERS.some(x => x.id !== id && x.email === v.toLowerCase())){
+      alert('Another customer already uses this email.');
+      renderAdmin();
+      return;
+    }
+    c[field] = v.toLowerCase();
+    saveCustomers();
+    renderAdmin();
+    return;
   } else if(!v){
     alert('This field cannot be empty.');
     renderAdmin();
