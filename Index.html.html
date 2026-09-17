@@ -610,6 +610,21 @@ function deleteBooking(id){
   renderAdmin();
 }
 
+// Manual override for the live fleet status. There's no automatic "vehicle handed back"
+// event in this app, so when a booking's drop-off time passes, the fleet view keeps
+// showing that vehicle as rented/overdue until either a new booking for it starts or the
+// admin clears it here -- e.g. because the bike actually came back but the customer kept
+// the booking's drop-off time in the past, or the overdue alert was a mistake.
+function markBookingReturned(id, returned){
+  const bk = BOOKINGS.find(x => x.id === id);
+  if(!bk) return;
+  bk.returnedAt = returned ? new Date().toISOString() : null;
+  bk.modifiedAt = new Date().toISOString();
+  saveBookings();
+  notifiedOverdueIds.delete(id); // so a future re-rental of this vehicle can alert again if it goes overdue
+  renderAdmin();
+}
+
 let BOOKINGS = loadBookings();
 
 /* ============ CUSTOMER NOTIFICATIONS (return reminders / extension requests) ============
@@ -759,6 +774,7 @@ function vehicleActiveBooking(vehicleId){
   let latestStarted = null;
   for(const bk of BOOKINGS){
     if(bk.vehicleId !== vehicleId) continue;
+    if(bk.returnedAt) continue; // admin has manually cleared this booking off the vehicle
     const start = new Date(bk.pickupDate + 'T' + bk.pickupTime);
     if(start > now) continue; // hasn't been picked up yet
     if(!latestStarted || start > new Date(latestStarted.pickupDate + 'T' + latestStarted.pickupTime)){
@@ -2162,9 +2178,10 @@ function renderAdmin(){
                 ${(() => {
                   const rs = vehicleRentalStatus(v.id);
                   if(!rs.rented) return `<span class="badge badge-available">Available now</span>`;
-                  return rs.overdue
+                  const badge = rs.overdue
                     ? `<span class="badge badge-overdue">⚠ Overdue · was due ${fmtDate(rs.untilDate)}, ${fmtTime(rs.untilTime)}</span>`
                     : `<span class="badge badge-rented">Rented · back ${fmtDate(rs.untilDate)}, ${fmtTime(rs.untilTime)}</span>`;
+                  return badge + `<button class="btn-ghost" style="padding:3px 8px;font-size:11.5px;background:#123A28;color:#7EE2B8;border-color:#123A28;" onclick="markBookingReturned('${rs.booking.id}', true)" title="Booking ${rs.booking.id} · ${rs.booking.customerName}">✅ Mark returned</button>`;
                 })()}
               </div>
               <label class="photo-upload-label">
@@ -2520,6 +2537,9 @@ function bookingsListInnerHtml(){
         <button class="btn-ghost" onclick="sendCustomerNotification('${bk.id}','return')">🔔 Remind to return</button>
         <button class="btn-ghost" onclick="sendCustomerNotification('${bk.id}','extension')">📅 Ask about extension</button>
         <button class="btn-ghost" style="background:var(--teal);color:#0B1615;border-color:var(--teal);" onclick="toggleExtendForm('${bk.id}')">🕒 ${extendDraft && extendDraft.bookingId===bk.id ? 'Cancel extend' : 'Extend rental'}</button>
+        ${bk.returnedAt
+          ? `<button class="btn-ghost" style="color:#7EE2B8;border-color:#123A28;" onclick="markBookingReturned('${bk.id}', false)">↩ Marked returned ${fmtDate(bk.returnedAt.slice(0,10))} — undo</button>`
+          : `<button class="btn-ghost" style="background:#123A28;color:#7EE2B8;border-color:#123A28;" onclick="markBookingReturned('${bk.id}', true)">✅ Mark vehicle as returned</button>`}
         <button class="btn-ghost" style="color:#F3A19C;border-color:#5A2A26;" onclick="deleteBooking('${bk.id}')">🗑 Delete booking</button>
       </div>
       ${extendDraft && extendDraft.bookingId === bk.id ? renderExtendFormHtml(bk) : ''}
