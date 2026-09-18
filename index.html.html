@@ -3,25 +3,63 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>24x7 Bike4u — Rent Your Perfect Ride</title>
-<meta name="description" content="Rent bikes and scooters in Indore, 24x7. Easy KYC, flexible plans, doorstep-ready fleet — RENT IT, LIKE YOU OWN IT!">
+<title>Bike & Scooter Rental in Indore, Open 24x7 | 24x7 Bike4u</title>
+<meta name="description" content="Rent bikes & scooters in Indore anytime, day or night. Activa, Jupiter, Pulsar, Royal Enfield & more — hourly, daily, weekly plans, easy online KYC, doorstep-ready fleet. RENT IT, LIKE YOU OWN IT!">
+<meta name="keywords" content="bike rental Indore, scooter rental Indore, two wheeler rental Indore, self drive bike rental Indore, Activa on rent Indore, bike rent near me, 24x7 bike rental">
+<meta name="robots" content="index, follow">
+<meta name="geo.region" content="IN-MP">
+<meta name="geo.placename" content="Indore">
 <link rel="canonical" href="https://www.24x7bike4u.in/">
 
 <!-- Open Graph (WhatsApp/Facebook/LinkedIn link-preview) -->
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="24x7 Bike4U Bike Rentals">
-<meta property="og:title" content="24x7 Bike4u — Rent Your Perfect Ride">
-<meta property="og:description" content="Rent bikes and scooters in Indore, 24x7. Easy KYC, flexible plans, doorstep-ready fleet — RENT IT, LIKE YOU OWN IT!">
+<meta property="og:title" content="Bike & Scooter Rental in Indore, Open 24x7 | 24x7 Bike4u">
+<meta property="og:description" content="Rent bikes & scooters in Indore anytime, day or night. Hourly, daily and weekly plans, easy online KYC, doorstep-ready fleet — RENT IT, LIKE YOU OWN IT!">
 <meta property="og:url" content="https://www.24x7bike4u.in/">
 <meta property="og:image" content="https://www.24x7bike4u.in/og-image.png">
 <meta property="og:image:width" content="240">
 <meta property="og:image:height" content="240">
+<meta property="og:locale" content="en_IN">
 
 <!-- Twitter/X card -->
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="24x7 Bike4u — Rent Your Perfect Ride">
-<meta name="twitter:description" content="Rent bikes and scooters in Indore, 24x7. Easy KYC, flexible plans, doorstep-ready fleet.">
+<meta name="twitter:title" content="Bike & Scooter Rental in Indore, Open 24x7 | 24x7 Bike4u">
+<meta name="twitter:description" content="Rent bikes & scooters in Indore anytime, day or night. Hourly, daily and weekly plans, easy online KYC, doorstep-ready fleet.">
 <meta name="twitter:image" content="https://www.24x7bike4u.in/og-image.png">
+
+<!-- Structured data: tells Google this is a local vehicle-rental business, which is what
+     powers the Maps/local-pack results and rich snippets for "bike rental near me" style
+     searches -- plain title/meta tags alone can't do this. -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "AutoRental",
+  "name": "24x7 Bike4U Bike Rentals",
+  "alternateName": "24x7 Bike4u",
+  "image": "https://www.24x7bike4u.in/og-image.png",
+  "url": "https://www.24x7bike4u.in/",
+  "telephone": "+91-8982008803",
+  "priceRange": "₹₹",
+  "address": {
+    "@type": "PostalAddress",
+    "addressLocality": "Indore",
+    "addressRegion": "Madhya Pradesh",
+    "addressCountry": "IN"
+  },
+  "areaServed": {
+    "@type": "City",
+    "name": "Indore"
+  },
+  "openingHoursSpecification": {
+    "@type": "OpeningHoursSpecification",
+    "dayOfWeek": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"],
+    "opens": "00:00",
+    "closes": "23:59"
+  },
+  "sameAs": []
+}
+</script>
 
 <link rel="icon" type="image/png" href="/og-image.png">
 <script>
@@ -108,16 +146,16 @@
   button{font-family:inherit;cursor:pointer;}
 
   /* ---------- Header ---------- */
-  header{border-bottom:1px solid var(--border);padding:16px 0;position:sticky;top:0;background:rgba(20,25,27,0.94);backdrop-filter:blur(8px);z-index:50;}
+  header{border-bottom:1px solid var(--border);padding:20px 0;position:sticky;top:0;background:rgba(20,25,27,0.94);backdrop-filter:blur(8px);z-index:50;}
   .header-inner{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:nowrap;max-width:640px;margin:0 auto;padding:0 20px;}
   .header-inner > div:last-child{display:flex;align-items:center;gap:12px;flex-shrink:0;}
   @media (max-width:480px){
-    .header-inner{padding:0 12px;gap:6px;}
-    .header-inner > div:last-child{gap:8px !important;}
-    .header-inner > div:last-child > a{display:none;} /* Call/WhatsApp icons -- already in the footer, and the header has no room for them on a narrow phone */
-    .brand-tag{display:none;}
-    .brand-mark{width:30px;height:30px;}
-    .brand-name{font-size:14.5px;}
+    header{padding:16px 0 14px;}
+    .header-inner{padding:0 14px;gap:8px;flex-wrap:wrap;} /* logo gets its own full-width row so it never gets squeezed off */
+    .brand{flex:0 0 100%;}
+    .header-inner > div:last-child{flex:0 0 100%;justify-content:flex-end;margin-top:10px;gap:10px !important;} /* Call/WhatsApp/Login shifted onto their own row below the logo */
+    .brand-mark{width:34px;height:34px;}
+    .brand-name{font-size:16px;}
   }
   .brand{display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 auto;overflow:hidden;}
   .brand-mark{width:36px;height:36px;border-radius:50%;object-fit:cover;flex-shrink:0;background:var(--surface-2);border:1px solid var(--border-strong);}
@@ -1164,8 +1202,9 @@ function renderHome(){
   document.getElementById('app').innerHTML = `
     <div class="wrap page">
       <div class="hero-eyebrow"><span class="pulse-dot"></span> OPEN 24 HOURS · NO WAITLIST</div>
-      <h1>Rent your perfect ride</h1>
-      <p class="lead">Pick a vehicle type, your dates and a km plan — we'll show transparent pricing, no surprises.</p>
+      <h1>Bike &amp; Scooter Rental in Indore</h1>
+      <p class="lead">Pick a vehicle type, your dates and a km plan — we'll show transparent pricing, no surprises. Activa, Jupiter, Pulsar, Royal Enfield and more, available hourly, daily and weekly across Indore.</p>
+      <button onclick="restartTour()" style="background:none;border:none;color:var(--yellow);font-size:12.5px;font-weight:600;padding:0 0 14px;cursor:pointer;">🧭 Take a quick tour</button>
       ${!state.currentCustomer ? `
       <div class="note-box" style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:20px;">
         <span>New here? Create your KYC profile once and book faster next time.</span>
@@ -1205,12 +1244,12 @@ function renderHome(){
         </div>
 
         ${plan.isPureWeekly ? `
-        <div class="field">
+        <div class="field" id="km-section">
           <label>Kilometres included</label>
           <div class="note-box" style="margin:0;">Weekly rate applied — 700 km included per week × ${plan.weeks} week${plan.weeks > 1 ? 's' : ''} = ${plan.weeks * 700} km total.</div>
         </div>
         ` : `
-        <div class="field">
+        <div class="field" id="km-section">
           <label>Kilometres required</label>
           <div class="km-options" style="grid-template-columns:repeat(${plan.kmOptions.length},1fr);">
             ${plan.kmOptions.map(k => `
@@ -1226,6 +1265,11 @@ function renderHome(){
 
         <button class="btn-primary" onclick="searchVehicles()">Search available vehicles</button>
         <div class="err" id="home-err" style="display:none;">Drop-off must be after pickup — check your dates and times.</div>
+      </div>
+
+      <div style="margin-top:28px;padding-top:20px;border-top:1px solid var(--border);color:var(--text-dim);font-size:13px;line-height:1.7;">
+        <h2 style="font-size:15px;color:var(--text);margin-bottom:8px;">Bike &amp; scooter rental in Indore, available 24x7</h2>
+        <p>24x7 Bike4U is a self-drive two-wheeler rental service based in Indore, Madhya Pradesh — open around the clock with no waitlist. Choose from scooters like the Activa, Jupiter and Maestro Edge, or bikes like the Pulsar, Royal Enfield Classic and Himalayan, on hourly, 12-hour, daily and weekly plans. Sign up once with your KYC documents and book your next ride in minutes, anywhere in Indore.</p>
       </div>
     </div>
   `;
@@ -1519,6 +1563,7 @@ function confirmBookingAndSend(){
   notifyIfNewBooking(booking);
 
   bookOnWhatsapp(booking);
+  sendInvoiceOnWhatsapp(booking.id, 'booking');
 
   // Fetch the IP and geo-location in the background (not awaited) so neither ever delays
   // the WhatsApp popup -- some browsers block window.open() if it's not immediately tied
@@ -2855,7 +2900,7 @@ function toggleBookingExpand(id){
 }
 
 function blankNewBookingDraft(){
-  return { customerId: '', vehicleId: '', pickupDate: '', pickupTime: '10:00', dropDate: '', dropTime: '10:00', kmPackage: 150, pickupCharge: 0, dropCharge: 0, helmetCharge: 0, shareOnWhatsapp: true };
+  return { customerId: '', vehicleId: '', pickupDate: '', pickupTime: '10:00', dropDate: '', dropTime: '10:00', kmPackage: 150, customKm: '', pickupCharge: 0, dropCharge: 0, helmetCharge: 0, discountType: 'flat', discountValue: 0, shareOnWhatsapp: true };
 }
 let newBookingDraft = null;
 let newBookingCustomerSearch = '';
@@ -2866,14 +2911,32 @@ function toggleNewBookingForm(){
 }
 function updateNewBookingDraftField(field, val){
   if(field === 'kmPackage'){
-    newBookingDraft[field] = parseInt(val, 10);
-  } else if(['pickupCharge','dropCharge','helmetCharge'].includes(field)){
+    newBookingDraft[field] = val === 'custom' ? 'custom' : parseInt(val, 10);
+  } else if(field === 'customKm'){
+    newBookingDraft[field] = val;
+  } else if(['pickupCharge','dropCharge','helmetCharge','discountValue'].includes(field)){
     const n = parseFloat(val);
     newBookingDraft[field] = isNaN(n) || n < 0 ? 0 : n;
+  } else if(field === 'discountType'){
+    newBookingDraft[field] = val;
   } else {
     newBookingDraft[field] = val;
   }
   renderAdmin();
+}
+// Resolves the manual booking's effective km figure -- the picked plan, or the admin's
+// free-typed number when "Other (enter manually)" is selected.
+function effectiveNewBookingKm(d){
+  if(d.kmPackage === 'custom'){
+    const n = parseInt(d.customKm, 10);
+    return isNaN(n) || n <= 0 ? 0 : n;
+  }
+  return d.kmPackage;
+}
+function newBookingDiscountAmount(d, rentBeforeDiscount){
+  if(!d.discountValue) return 0;
+  const amt = d.discountType === 'percent' ? (rentBeforeDiscount * d.discountValue / 100) : d.discountValue;
+  return Math.min(Math.max(amt, 0), rentBeforeDiscount);
 }
 
 // Filters the customer <select> options as the admin types, without touching the rest of
@@ -2904,8 +2967,9 @@ function renderNewBookingFormHtml(){
   const vehicle = VEHICLES.find(v => v.id === d.vehicleId);
   const plan = planForDates(d.pickupDate, d.pickupTime, d.dropDate, d.dropTime);
   const kmOptions = plan.kmOptions;
-  if(!kmOptions.includes(d.kmPackage)){ d.kmPackage = kmOptions.includes(150) ? 150 : kmOptions[0]; }
-  const billing = vehicle ? billingFor(vehicle, d.pickupDate, d.pickupTime, d.dropDate, d.dropTime, d.kmPackage) : null;
+  if(d.kmPackage !== 'custom' && !kmOptions.includes(d.kmPackage)){ d.kmPackage = kmOptions.includes(150) ? 150 : kmOptions[0]; }
+  const effectiveKm = effectiveNewBookingKm(d);
+  const billing = vehicle ? billingFor(vehicle, d.pickupDate, d.pickupTime, d.dropDate, d.dropTime, effectiveKm) : null;
   const selectedCustomer = CUSTOMERS.find(c => c.id === d.customerId);
 
   return `
@@ -2950,7 +3014,9 @@ function renderNewBookingFormHtml(){
         <label>Kilometre plan</label>
         <select onchange="updateNewBookingDraftField('kmPackage', this.value)">
           ${kmOptions.map(k => `<option value="${k}" ${d.kmPackage===k?'selected':''}>${k} km${plan.isPureShort && k===80 ? '' : '/day'}</option>`).join('')}
+          <option value="custom" ${d.kmPackage==='custom'?'selected':''}>Other (enter manually)</option>
         </select>
+        ${d.kmPackage === 'custom' ? `<input type="number" min="1" placeholder="Enter km" value="${d.customKm}" onchange="updateNewBookingDraftField('customKm', this.value)" style="margin-top:8px;">` : ''}
       </div>
       <p class="field-hint" style="margin-bottom:6px;">Additional charges (optional) — leave at 0 if not applicable.</p>
       <div class="avcard-fields wide" style="margin-bottom:8px;">
@@ -2967,9 +3033,24 @@ function renderNewBookingFormHtml(){
           <input type="number" min="0" value="${d.helmetCharge}" onchange="updateNewBookingDraftField('helmetCharge', this.value)">
         </div>
       </div>
+      <p class="field-hint" style="margin-bottom:6px;">Discount (optional) — applied to the rent before deposit.</p>
+      <div class="field-row" style="margin-bottom:8px;">
+        <div>
+          <label>Discount type</label>
+          <div class="type-toggle">
+            <button class="${d.discountType==='flat'?'active':''}" onclick="newBookingDraft.discountType='flat';renderAdmin();">₹ Flat</button>
+            <button class="${d.discountType==='percent'?'active':''}" onclick="newBookingDraft.discountType='percent';renderAdmin();">% Percent</button>
+          </div>
+        </div>
+        <div>
+          <label>Discount value</label>
+          <input type="number" min="0" value="${d.discountValue}" onchange="updateNewBookingDraftField('discountValue', this.value)">
+        </div>
+      </div>
       ${billing && billing.totalHours > 0 ? (() => {
           const extras = (d.pickupCharge||0) + (d.dropCharge||0) + (d.helmetCharge||0);
-          const grand = billing.total + extras;
+          const discount = newBookingDiscountAmount(d, billing.total);
+          const grand = billing.total + extras - discount;
           const extrasParts = [];
           if(d.pickupCharge) extrasParts.push(`Pickup ${money(d.pickupCharge)}`);
           if(d.dropCharge) extrasParts.push(`Drop-off ${money(d.dropCharge)}`);
@@ -2977,7 +3058,8 @@ function renderNewBookingFormHtml(){
           return `
       <div class="note-box" style="margin-bottom:8px;">
         Duration: <strong>${durationLabel(billing.totalHours)}</strong> · Rent: <strong>${money(billing.total)}</strong>${extrasParts.length ? ` · ${extrasParts.join(' · ')}` : ''} · Deposit: <strong>${money(vehicle.deposit)}</strong> · Extra km: <strong>₹${vehicle.extraKm}/km</strong>
-        ${extras > 0 ? `<br><strong>Total rent + charges: ${money(grand)}</strong> (deposit collected and refunded separately)` : ''}
+        ${discount > 0 ? `<br>Discount: <strong style="color:var(--teal);">-${money(discount)}</strong>` : ''}
+        <br><strong>Total rent + charges: ${money(grand)}</strong> (deposit collected and refunded separately)
       </div>`;
         })() : `<div class="field-hint" style="margin-bottom:8px;">Pick a vehicle and valid pickup/drop-off dates to see the price.</div>`}
       <div class="err" id="new-booking-err" style="display:none;"></div>
@@ -3003,7 +3085,10 @@ function saveNewBooking(){
   if(!vehicle){ showErr('Please select a vehicle.'); return; }
   const plan = planForDates(d.pickupDate, d.pickupTime, d.dropDate, d.dropTime);
   if(plan.totalHours <= 0){ showErr('Please enter a valid pickup and drop-off date/time (drop-off must be after pickup).'); return; }
-  const billing = billingFor(vehicle, d.pickupDate, d.pickupTime, d.dropDate, d.dropTime, d.kmPackage);
+  const effectiveKm = effectiveNewBookingKm(d);
+  if(!effectiveKm){ showErr('Please enter a valid km figure.'); return; }
+  const billing = billingFor(vehicle, d.pickupDate, d.pickupTime, d.dropDate, d.dropTime, effectiveKm);
+  const discountAmount = newBookingDiscountAmount(d, billing.total);
 
   const maxNum = BOOKINGS.reduce((m,bk) => Math.max(m, parseInt((bk.id||'BK0').replace('BK',''),10) || 0), 0);
   const booking = {
@@ -3019,11 +3104,14 @@ function saveNewBooking(){
     pickupDate: d.pickupDate, pickupTime: d.pickupTime,
     dropDate: d.dropDate, dropTime: d.dropTime,
     durationLabel: durationLabel(billing.totalHours),
-    kmLabel: billing.isPureWeekly ? `${billing.includedKm} km included (700 km/week)` : `${d.kmPackage} km${kmUnit(billing, d.kmPackage)} · ${billing.includedKm} km included`,
-    rentalTotal: billing.total + (d.pickupCharge||0) + (d.dropCharge||0) + (d.helmetCharge||0),
+    kmLabel: billing.isPureWeekly ? `${billing.includedKm} km included (700 km/week)` : `${effectiveKm} km${kmUnit(billing, effectiveKm)} · ${billing.includedKm} km included`,
+    rentalTotal: billing.total + (d.pickupCharge||0) + (d.dropCharge||0) + (d.helmetCharge||0) - discountAmount,
     pickupCharge: d.pickupCharge || 0,
     dropCharge: d.dropCharge || 0,
     helmetCharge: d.helmetCharge || 0,
+    discountType: discountAmount ? d.discountType : null,
+    discountValue: discountAmount ? d.discountValue : 0,
+    discountAmount: discountAmount,
     deposit: vehicle.deposit,
     extraKmCharge: vehicle.extraKm,
     paymentMethod: 'Cash / UPI / Card (collected at pickup/drop-off)',
@@ -3040,6 +3128,7 @@ function saveNewBooking(){
   newBookingDraft = null;
   renderAdmin();
   if(shouldShare){ shareBookingOnWhatsapp(booking.id); }
+  sendInvoiceOnWhatsapp(booking.id, 'booking');
 }
 
 /* ============ EXTEND BOOKING ============
@@ -3164,6 +3253,7 @@ function saveExtension(){
     const waMsg = `*24x7 Bike4U Bike Rentals*\n${notif.title}\n\n${notif.body}\n\nOriginal drop-off was ${fmtDate(oldDropDate)}, ${fmtTime(oldDropTime)}.`;
     window.open(`https://wa.me/91${num}?text=${encodeURIComponent(waMsg)}`, '_blank');
   }
+  sendInvoiceOnWhatsapp(bk.id, 'extension');
 }
 
 function renderTermsAdminHtml(){
@@ -3582,6 +3672,141 @@ function generateBookingAgreementPDF(id){
   doc.text(`Geo-tag location at time of booking: ${bk.customerGeo || 'Not recorded'}`, margin, y);
 
   doc.save(`Bike4u-Agreement-${bk.customerName.replace(/\s+/g,'_')}-${bk.id}.pdf`);
+}
+
+/* ============ INVOICES ============
+   A compact, itemised invoice PDF -- separate from the full rental agreement above --
+   auto-generated the moment a booking is created, and again every time it's extended
+   (each extension gets its own invoice showing just that extra charge, plus the running
+   total). Real-time, silent WhatsApp delivery isn't something a plain website can do --
+   no browser lets a page message someone on WhatsApp without a human tapping Send, and
+   that requires WhatsApp's paid Business API running on a server, not a static site. This
+   gets as close as a browser allows: it builds the PDF automatically and, on a phone,
+   hands it straight to WhatsApp via the native share sheet so sending it is one tap instead
+   of a manual "open WhatsApp, attach file, find chat, send". */
+function invoiceLineItems(bk, extension){
+  const items = [];
+  const baseRent = bk.rentalTotal - (bk.pickupCharge||0) - (bk.dropCharge||0) - (bk.helmetCharge||0) + (bk.discountAmount||0) + (bk.couponDiscount||0)
+    - (bk.extensions || []).reduce((s,e) => s + (e.charge||0), 0);
+  items.push(['Rent', bk.kmLabel, money(baseRent)]);
+  if(bk.pickupCharge) items.push(['Pickup charge', '', money(bk.pickupCharge)]);
+  if(bk.dropCharge) items.push(['Drop-off charge', '', money(bk.dropCharge)]);
+  if(bk.helmetCharge) items.push(['Extra helmet', '', money(bk.helmetCharge)]);
+  (bk.extensions || []).forEach((e, i) => {
+    if(e.charge) items.push([`Extension ${i+1}`, `to ${fmtDate(e.toDate)}, ${fmtTime(e.toTime)}`, money(e.charge)]);
+  });
+  if(bk.couponCode) items.push([`Coupon (${bk.couponCode})`, '', `-${money(bk.couponDiscount)}`]);
+  if(bk.discountAmount) items.push(['Discount', bk.discountType === 'percent' ? `${bk.discountValue}%` : '', `-${money(bk.discountAmount)}`]);
+  return items;
+}
+
+function generateInvoicePDF(id, kind, extension){
+  const bk = BOOKINGS.find(x => x.id === id);
+  if(!bk || !window.jspdf) return null;
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const margin = 40;
+  let y = 50;
+  const YELLOW = [245, 194, 27];
+  const TEAL = [49, 182, 164];
+  const DARK = [30, 34, 34];
+
+  try{ doc.addImage(LOGO_BASE64, 'PNG', margin, y - 26, 34, 34); }catch(e){}
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(18);
+  doc.setTextColor(...TEAL);
+  doc.text('24x7 Bike4u', margin + 42, y - 6);
+  doc.setFontSize(12);
+  doc.setTextColor(...DARK);
+  doc.text(kind === 'extension' ? 'Extension Invoice' : 'Booking Invoice', margin + 42, y + 12);
+  doc.setTextColor(0, 0, 0);
+  y += 34;
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.text(`Invoice for Booking ${bk.id}   ·   Issued ${fmtDate(todayStr())}`, margin, y);
+  y += 20;
+
+  doc.setDrawColor(...YELLOW);
+  doc.setLineWidth(2);
+  doc.line(margin, y, pageW - margin, y);
+  doc.setLineWidth(1);
+  y += 22;
+
+  [['Customer', `${bk.customerName} (${bk.customerMobile})`],
+   ['Vehicle', `${bk.vehicleName} (${bk.vehicleColour}, ${bk.vehicleRc})`],
+   ['Pickup', `${fmtDate(bk.pickupDate)}, ${fmtTime(bk.pickupTime)}`],
+   ['Drop-off (current)', `${fmtDate(bk.dropDate)}, ${fmtTime(bk.dropTime)}`]].forEach(([label, value]) => {
+    doc.setFont('helvetica', 'bold'); doc.setTextColor(...TEAL); doc.text(label + ':', margin, y);
+    doc.setFont('helvetica', 'normal'); doc.setTextColor(...DARK); doc.text(String(value), margin + 130, y);
+    y += 16;
+  });
+  y += 10;
+
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...TEAL);
+  doc.text('Item', margin, y); doc.text('Details', margin + 220, y); doc.text('Amount', pageW - margin - 70, y);
+  doc.setTextColor(0,0,0);
+  y += 6;
+  doc.setDrawColor(200); doc.line(margin, y, pageW - margin, y);
+  y += 16;
+
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10.5);
+  invoiceLineItems(bk, extension).forEach(([label, detail, amt]) => {
+    doc.text(label, margin, y);
+    if(detail) doc.text(detail, margin + 220, y);
+    doc.text(String(amt), pageW - margin - 70, y);
+    y += 17;
+  });
+  doc.text('Deposit (refundable)', margin, y);
+  doc.text(money(bk.deposit), pageW - margin - 70, y);
+  y += 10;
+
+  y += 10;
+  doc.setDrawColor(...YELLOW); doc.setLineWidth(2); doc.line(margin, y, pageW - margin, y); doc.setLineWidth(1);
+  y += 22;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(...TEAL);
+  doc.text('Total (rent + charges)', margin, y);
+  doc.text(money(bk.rentalTotal), pageW - margin - 70, y);
+  doc.setTextColor(0,0,0);
+  y += 22;
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(120);
+  doc.text('Deposit is collected and refunded separately at drop-off. Payment: ' + bk.paymentMethod, margin, y);
+
+  return { doc, bk };
+}
+
+// Builds the invoice and hands it to WhatsApp -- via the phone's native share sheet
+// (one tap, file pre-attached) when available, otherwise downloads the PDF and opens a
+// WhatsApp chat with the customer so the admin can attach it themselves.
+function sendInvoiceOnWhatsapp(id, kind, extension){
+  ensureJsPDFThen(function(){
+    const result = generateInvoicePDF(id, kind, extension);
+    if(!result) return;
+    const { doc, bk } = result;
+    const filename = `Bike4u-Invoice-${bk.customerName.replace(/\s+/g,'_')}-${bk.id}${kind==='extension' ? '-ext' : ''}.pdf`;
+    const waNum = (bk.customerMobile || '').replace(/\D/g, '');
+    const caption = kind === 'extension'
+      ? `*24x7 Bike4U Bike Rentals*\nHere's your updated invoice after the extension on Booking ${bk.id}.\nNew total: ${money(bk.rentalTotal)}`
+      : `*24x7 Bike4U Bike Rentals*\nHere's your invoice for Booking ${bk.id}.\nTotal: ${money(bk.rentalTotal)}`;
+
+    let shared = false;
+    try{
+      const blob = doc.output('blob');
+      const file = new File([blob], filename, { type: 'application/pdf' });
+      if(navigator.canShare && navigator.canShare({ files: [file] })){
+        navigator.share({ files: [file], title: filename, text: caption }).catch(() => {});
+        shared = true;
+      }
+    }catch(e){ /* Web Share API with files not supported here -- fall through */ }
+
+    if(!shared){
+      doc.save(filename);
+      if(waNum){
+        window.open(`https://wa.me/91${waNum}?text=${encodeURIComponent(caption + '\n\n(Invoice PDF just downloaded on this device -- attach it here to send.)')}`, '_blank');
+      }
+    }
+  });
 }
 
 function setAdminTab(tab){
@@ -4104,6 +4329,10 @@ window.addEventListener('hashchange', function(){
   }
 });
 function render(){
+  if(state.page !== 'home' && (tourActive || document.getElementById('tour-tooltip'))){
+    tourActive = false;
+    removeTourUI();
+  }
   renderSteps();
   if(state.page === 'home') renderHome();
   else if(state.page === 'list') renderList();
@@ -4126,6 +4355,91 @@ function render(){
   window.scrollTo({top:0, behavior:'smooth'});
 }
 
+/* ============ GUIDED TOUR ============
+   A short, dismissible walkthrough that highlights what to tap next on first visit to the
+   home page -- vehicle type, dates, km plan, then Search. Shown once per browser (tracked
+   in localStorage); replayable any time via the "Take a quick tour" link under the hero. */
+const TOUR_STORAGE_KEY = 'bike4u_tour_seen_v1';
+const HOME_TOUR_STEPS = [
+  { selector: '.type-toggle', title: 'Step 1 · Choose your ride', text: 'Tap Scooter or Bike to start your search.' },
+  { selector: '#pickupDate', title: 'Step 2 · Pickup date & time', text: 'Set when you want to pick up the vehicle.' },
+  { selector: '#dropDate', title: 'Step 3 · Drop-off date & time', text: "Set when you'll bring it back." },
+  { selector: '#km-section', title: 'Step 4 · Kilometres', text: 'Pick a km plan that fits your trip.' },
+  { selector: '.btn-primary', title: 'Step 5 · Search', text: 'Tap here to see available vehicles and pricing.' },
+];
+let tourStepIndex = 0;
+let tourActive = false;
+
+function maybeStartHomeTour(){
+  if(state.page !== 'home') return;
+  let seen = null;
+  try{ seen = localStorage.getItem(TOUR_STORAGE_KEY); }catch(e){}
+  if(seen) return;
+  tourStepIndex = 0;
+  tourActive = true;
+  setTimeout(showTourStep, 500); // let the home page finish painting first
+}
+
+function showTourStep(){
+  removeTourUI();
+  if(!tourActive || state.page !== 'home') return;
+  while(tourStepIndex < HOME_TOUR_STEPS.length){
+    const step = HOME_TOUR_STEPS[tourStepIndex];
+    const el = document.querySelector(step.selector);
+    if(el){ renderTourStep(el, step); return; }
+    tourStepIndex++; // element not on screen right now (e.g. km chips before dates are valid) -- skip to the next step
+  }
+  endTour();
+}
+
+function renderTourStep(el, step){
+  const rect = el.getBoundingClientRect();
+  const pad = 6;
+
+  const highlight = document.createElement('div');
+  highlight.id = 'tour-highlight';
+  highlight.style.cssText = `position:fixed;top:${rect.top-pad}px;left:${rect.left-pad}px;width:${rect.width+pad*2}px;height:${rect.height+pad*2}px;border:2px solid var(--yellow);border-radius:10px;box-shadow:0 0 0 9999px rgba(0,0,0,.6);z-index:9999;pointer-events:none;transition:top .25s ease,left .25s ease,width .25s ease,height .25s ease;`;
+  document.body.appendChild(highlight);
+
+  const spaceBelow = window.innerHeight - rect.bottom;
+  const above = spaceBelow < 160;
+  const tip = document.createElement('div');
+  tip.id = 'tour-tooltip';
+  const tipTop = above ? Math.max(12, rect.top - 12) : rect.bottom + 12;
+  tip.style.cssText = `position:fixed;${above ? `bottom:${window.innerHeight - tipTop}px;` : `top:${tipTop}px;`}left:${Math.max(12, Math.min(rect.left, window.innerWidth-300))}px;width:270px;background:var(--surface);border:1px solid var(--border-strong);border-radius:12px;padding:14px 16px;z-index:10000;box-shadow:0 8px 20px rgba(0,0,0,.45);color:var(--text);font-family:inherit;`;
+  tip.innerHTML = `
+    <div style="font-weight:700;margin-bottom:4px;">${step.title}</div>
+    <div style="font-size:13px;color:var(--text-dim);margin-bottom:10px;">${step.text}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <span style="font-size:11px;color:var(--text-faint);">Step ${tourStepIndex+1} of ${HOME_TOUR_STEPS.length}</span>
+      <div style="display:flex;gap:8px;">
+        <button onclick="skipTour()" style="background:none;border:none;color:var(--text-dim);font-size:12px;cursor:pointer;padding:6px 4px;">Skip</button>
+        <button onclick="nextTourStep()" class="btn-primary" style="margin:0;width:auto;padding:7px 14px;font-size:12.5px;">${tourStepIndex === HOME_TOUR_STEPS.length-1 ? 'Done' : 'Next'}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(tip);
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function nextTourStep(){ tourStepIndex++; showTourStep(); }
+function skipTour(){ endTour(); }
+function endTour(){
+  tourActive = false;
+  removeTourUI();
+  try{ localStorage.setItem(TOUR_STORAGE_KEY, '1'); }catch(e){}
+}
+function removeTourUI(){
+  ['tour-highlight','tour-tooltip'].forEach(id => {
+    const el = document.getElementById(id);
+    if(el) el.remove();
+  });
+}
+function restartTour(){
+  try{ localStorage.removeItem(TOUR_STORAGE_KEY); }catch(e){}
+  maybeStartHomeTour();
+}
+
 /* ============ INIT ============ */
 (function init(){
   const now = new Date();
@@ -4146,6 +4460,7 @@ function render(){
   }
   render();
   syncFromSupabase();
+  maybeStartHomeTour();
 
   // Keep the admin Fleet view's "Rented until.../Available now" badges accurate even
   // when nothing else changes -- a vehicle becomes free purely because time passed, not
