@@ -570,21 +570,26 @@ async function syncFromSupabase(){
     sbSet('vehicles', VEHICLES);
   }
 
-  if(Array.isArray(remoteCustomers)){
+  // Guarded the same way as vehicles above: an empty array from Supabase here almost
+  // always means a transient read glitch, not that every customer vanished, so we never
+  // let it wipe out customers this browser already has. Only a genuinely non-empty
+  // remote list -- or this browser having nothing to lose -- is accepted.
+  if(Array.isArray(remoteCustomers) && (remoteCustomers.length || CUSTOMERS.length === 0)){
     CUSTOMERS = remoteCustomers;
     try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
+    lastSyncOk.customers = true;
   } else {
-    sbSet('customers', CUSTOMERS);
+    sbSet('customers', CUSTOMERS).then(ok => { lastSyncOk.customers = ok; if(state.isAdmin && state.page==='admin') render(); });
   }
 
-  if(Array.isArray(remoteBookings)){
+  if(Array.isArray(remoteBookings) && (remoteBookings.length || BOOKINGS.length === 0)){
     BOOKINGS = remoteBookings;
     try{ localStorage.setItem(BOOKINGS_STORAGE_KEY, JSON.stringify(BOOKINGS)); }catch(e){}
   } else {
     sbSet('bookings', BOOKINGS);
   }
 
-  if(Array.isArray(remoteNotifications)){
+  if(Array.isArray(remoteNotifications) && (remoteNotifications.length || NOTIFICATIONS.length === 0)){
     NOTIFICATIONS = remoteNotifications;
     try{ localStorage.setItem(NOTIFICATIONS_STORAGE_KEY, JSON.stringify(NOTIFICATIONS)); }catch(e){}
   } else {
@@ -592,7 +597,7 @@ async function syncFromSupabase(){
   }
 
   const remoteCoupons = await sbGet('coupons');
-  if(Array.isArray(remoteCoupons)){
+  if(Array.isArray(remoteCoupons) && (remoteCoupons.length || COUPONS.length === 0)){
     COUPONS = remoteCoupons;
     try{ localStorage.setItem(COUPONS_STORAGE_KEY, JSON.stringify(COUPONS)); }catch(e){}
   } else {
@@ -657,6 +662,12 @@ let VEHICLES = loadVehicles();
 /* ============ CUSTOMER PERSISTENCE (KYC profiles saved in this browser) ============ */
 const CUSTOMERS_STORAGE_KEY = 'bike4u_customers_v1';
 
+// Tracks whether the last attempted cloud save for a given key actually succeeded --
+// surfaced as a banner in the admin panel so a silently-failed customer/booking save
+// (most commonly the customer photos pushing the payload past Supabase's size limit)
+// doesn't go unnoticed.
+let lastSyncOk = { customers: true };
+
 function loadCustomers(){
   try{
     const saved = localStorage.getItem(CUSTOMERS_STORAGE_KEY);
@@ -677,7 +688,14 @@ function saveCustomers(){
     console.warn('Could not save customer data:', e);
     alert('Could not save your details. Your browser storage may be full -- this usually happens when the uploaded photos are large. Try using smaller/compressed images.');
   }
-  sbSet('customers', CUSTOMERS);
+  sbSet('customers', CUSTOMERS).then(ok => {
+    lastSyncOk.customers = ok;
+    // A failed cloud save here (most often the customer photos pushing the payload over
+    // Supabase's size limit) means this signup only exists on this one device/browser --
+    // it will never reach the admin's browser. Surface that immediately rather than
+    // leaving it to be discovered later as a "missing customer".
+    if(!ok && state.isAdmin && state.page === 'admin') render();
+  });
 }
 
 function deleteCustomer(id){
@@ -2550,15 +2568,27 @@ function vehicleCardHtml(v){
 
 function renderCustomersAdminHtml(){
   return `
+    ${!lastSyncOk.customers ? `
+    <div class="err" style="display:block;margin-bottom:14px;">
+      ⚠ The last customer save to the shared cloud database failed (often caused by very large uploaded photos). That signup may only exist on the customer's own device until this is retried. <button class="btn-ghost" onclick="saveCustomers();">Retry now</button>
+    </div>` : ''}
     <div class="add-card" style="margin-bottom:14px;">
-      <div class="field" style="margin-bottom:0;">
-        <label>Search</label>
-        <input type="text" id="customer-search-input" placeholder="Search by name, phone or email…" value="${state.customerSearch || ''}" oninput="onCustomerSearchInput(this.value)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:10px;">
+        <div class="field" style="margin-bottom:0;flex:1;">
+          <label>Search</label>
+          <input type="text" id="customer-search-input" placeholder="Search by name, phone or email…" value="${state.customerSearch || ''}" oninput="onCustomerSearchInput(this.value)">
+        </div>
+        <button class="btn-ghost" onclick="refreshCustomersFromCloud(this)">🔄 Refresh</button>
       </div>
     </div>
     ${newCustomerDraft ? renderNewCustomerFormHtml() : ''}
     <div id="customers-list-results">${customersListInnerHtml()}</div>
   `;
+}
+
+function refreshCustomersFromCloud(btn){
+  if(btn){ btn.disabled = true; btn.textContent = 'Refreshing…'; }
+  syncFromSupabase().then(() => { if(state.isAdmin && state.page === 'admin') render(); });
 }
 
 function onCustomerSearchInput(val){
@@ -2580,7 +2610,10 @@ function customersListInnerHtml(){
   if(filtered.length === 0){
     return `<div class="empty"><h3>No matching customers</h3><p>Try a different name, phone number or email.</p></div>`;
   }
-  return filtered.map(c => customerCardHtml(c)).join('');
+  // Newest signup first, so it's clear at a glance who just joined vs. who's been a
+  // customer for a while -- each card also shows its join date (see customerCardHtml).
+  const sorted = filtered.slice().sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  return `<div class="field-hint" style="margin-bottom:10px;">${filtered.length} customer${filtered.length===1?'':'s'} · sorted newest signup first</div>` + sorted.map(c => customerCardHtml(c)).join('');
 }
 function customerCardHtml(c){
   const waNumber = (c.mobile || '').replace(/\D/g,'');
@@ -2593,6 +2626,7 @@ function customerCardHtml(c){
         <div class="profile-info">
           <div class="profile-name">${c.name || 'Unnamed'}</div>
           <div class="profile-mobile">${c.mobile || 'No mobile on file'}</div>
+          <div class="field-hint" style="margin-top:2px;">${c.createdAt ? `Joined ${fmtDate(c.createdAt.slice(0,10))}${c.addedByAdmin ? ' · added by admin' : ''}` : ''}</div>
         </div>
         <div class="profile-actions" onclick="event.stopPropagation()">
           ${c.mobile ? `<a class="icon-btn call" href="tel:+91${waNumber}" title="Call">📞</a>
@@ -4467,7 +4501,8 @@ function restartTour(){
   // because any booking record was edited, so a periodic re-render is needed to catch it.
   setInterval(() => {
     checkOverdueBookings();
-    if(state.isAdmin && state.page === 'admin' && state.adminTab === 'vehicles') render();
+    syncFromSupabase(); // periodic pull so new signups/bookings from other devices show up without a manual reload
+    if(state.isAdmin && state.page === 'admin') render();
   }, 60000);
 })();
 </script>
