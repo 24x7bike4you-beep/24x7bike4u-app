@@ -694,7 +694,7 @@ function saveCustomers(){
     // Supabase's size limit) means this signup only exists on this one device/browser --
     // it will never reach the admin's browser. Surface that immediately rather than
     // leaving it to be discovered later as a "missing customer".
-    if(!ok && state.isAdmin && state.page === 'admin') render();
+    if(!ok && state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) render();
   });
 }
 
@@ -1153,6 +1153,18 @@ function fmtTime(t){
   return `${h12}:${m} ${ampm}`;
 }
 function money(n){ return '₹' + Math.round(n).toLocaleString('en-IN'); }
+
+// Guards periodic/background refreshes (the 60s poll, realtime pushes) from interrupting
+// someone actively typing into a field or open form -- rebuilding the whole page out from
+// under a focused input loses cursor position/focus and reads as the page "randomly"
+// clearing what was just typed. Background syncs still update the underlying data either
+// way; this only defers the *visual* re-render until the person isn't mid-edit.
+function userIsActivelyEditing(){
+  const ae = document.activeElement;
+  if(!ae) return false;
+  const tag = ae.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+}
 
 // Booking/customer IDs used to be "one more than the highest ID this device currently
 // knows about" -- fine on a single device, but this app syncs across many phones/laptops
@@ -2306,7 +2318,7 @@ async function subscribeAdminRealtime(){
           BOOKINGS = arr;
           try{ localStorage.setItem(BOOKINGS_STORAGE_KEY, JSON.stringify(BOOKINGS)); }catch(e){}
           freshOnes.forEach(notifyIfNewBooking);
-          if(state.isAdmin && state.page === 'admin') render();
+          if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) render();
         }
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_data', filter: 'key=eq.customers' }, (payload) => {
@@ -2318,7 +2330,7 @@ async function subscribeAdminRealtime(){
           CUSTOMERS = arr;
           try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
           freshOnes.forEach(notifyIfNewCustomer);
-          if(state.isAdmin && state.page === 'admin') render();
+          if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) render();
         }
       })
       .subscribe();
@@ -4587,7 +4599,7 @@ function restartTour(){
   setInterval(() => {
     checkOverdueBookings();
     syncFromSupabase(); // periodic pull so new signups/bookings from other devices show up without a manual reload
-    if(state.isAdmin && state.page === 'admin') render();
+    if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) render();
   }, 60000);
 })();
 </script>
