@@ -1057,6 +1057,45 @@ function vehicleRentalStatus(vehicleId){
   };
 }
 
+/* ============ AVAILABILITY / DOUBLE-BOOKING PREVENTION ============
+   Each vehicle is a single physical unit, not a pooled quantity -- so two customers can
+   never be handed the same bike for overlapping windows. These check a requested
+   pickup/drop window against every *other* not-yet-returned booking already on that
+   vehicle (current rental or a future reservation alike), independent of the live
+   "rented right now" status above, so a vehicle that's out today can still be booked for
+   next week, and a vehicle free right now can still correctly reject a request that would
+   overlap a reservation already on the books for later. */
+
+// [aStart, aEnd) vs [bStart, bEnd): true only on genuine overlap -- a drop-off and the
+// next pickup at the exact same moment is treated as back-to-back, not a conflict.
+function rangesOverlap(aStart, aEnd, bStart, bEnd){
+  return aStart < bEnd && bStart < aEnd;
+}
+
+function vehicleConflictingBookings(vehicleId, pickupDate, pickupTime, dropDate, dropTime, excludeBookingId){
+  const reqStart = new Date(pickupDate + 'T' + pickupTime);
+  const reqEnd = new Date(dropDate + 'T' + dropTime);
+  if(isNaN(reqStart) || isNaN(reqEnd) || reqEnd <= reqStart) return [];
+  return BOOKINGS.filter(bk => {
+    if(bk.vehicleId !== vehicleId) return false;
+    if(bk.returnedAt) return false; // admin has cleared it off the vehicle -- no longer occupies the schedule
+    if(excludeBookingId && bk.id === excludeBookingId) return false;
+    const exStart = new Date(bk.pickupDate + 'T' + bk.pickupTime);
+    const exEnd = new Date(bk.dropDate + 'T' + bk.dropTime);
+    return rangesOverlap(reqStart, reqEnd, exStart, exEnd);
+  });
+}
+
+// The latest drop-off among a set of conflicting bookings -- i.e. the earliest moment the
+// vehicle is free for every conflict to have cleared, used to tell the customer when to
+// try again.
+function latestDropOf(bookings){
+  return bookings.reduce((latest, bk) => {
+    const end = new Date(bk.dropDate + 'T' + bk.dropTime);
+    return (!latest || end > new Date(latest.dropDate + 'T' + latest.dropTime)) ? bk : latest;
+  }, null);
+}
+
 // Breaks total duration into Weekly + Daily + 12-Hour blocks per the business rules:
 // - <=12h total, with nothing else: the "pure" 12-hour case -> 80km plan becomes available.
 // - >12h and <24h total: billed as one full Daily plan (no 80km).
@@ -1501,6 +1540,10 @@ function renderList(){
         <div class="empty"><h3>No ${state.type}s available</h3><p>Try the other vehicle type.</p></div>
       ` : `<div class="vlist-grid">${list.map(v => {
         const b = billingBreakdown(v);
+        const rs = vehicleRentalStatus(v.id);
+        const conflicts = v.soldOut ? [] : vehicleConflictingBookings(v.id, state.pickupDate, state.pickupTime, state.dropDate, state.dropTime);
+        const blocked = conflicts.length > 0;
+        const nextFree = blocked ? latestDropOf(conflicts) : null;
         return `
         <div class="vcard" ${v.soldOut ? 'style="opacity:.55;"' : ''}>
           <div class="vcard-photo-wrap">
@@ -1517,6 +1560,9 @@ function renderList(){
                 <div class="lbl">total for ${durationLabel(b.totalHours)}</div>
               </div>
             </div>
+            ${!v.soldOut ? `<div style="margin:2px 0 8px;">${rs.rented
+              ? `<span class="badge badge-rented">Rented · back ${fmtDate(rs.untilDate)}, ${fmtTime(rs.untilTime)}</span>`
+              : `<span class="badge badge-available">Available now</span>`}</div>` : ''}
             <div class="vcard-stats">
               <div class="stat"><div class="v">${b.includedKm} km</div><div class="k">Included total kms</div></div>
               <div class="stat"><div class="v">${money(v.deposit)}</div><div class="k">Deposit (refundable)</div></div>
@@ -1524,6 +1570,9 @@ function renderList(){
             </div>
             ${v.soldOut
               ? `<button class="vcard-select" disabled style="pointer-events:none;color:var(--text-faint);">Sold out</button>`
+              : blocked
+              ? `<button class="vcard-select" disabled style="pointer-events:none;color:var(--text-faint);">Not available for these dates</button>
+                 <div class="field-hint" style="text-align:center;margin-top:6px;">Next free from ${fmtDate(nextFree.dropDate)}, ${fmtTime(nextFree.dropTime)} — try different dates or check back then.</div>`
               : `<button class="vcard-select" onclick="selectVehicle('${v.id}')">Select vehicle</button>`}
           </div>
         </div>
@@ -1533,7 +1582,18 @@ function renderList(){
 }
 
 function selectVehicle(id){
-  state.selectedVehicle = VEHICLES.find(v => v.id === id);
+  const v = VEHICLES.find(x => x.id === id);
+  if(!v) return;
+  // Defensive re-check in case this vehicle got booked by someone else since the list was
+  // last drawn (e.g. a realtime update landed, or the list is a few minutes stale).
+  const conflicts = vehicleConflictingBookings(id, state.pickupDate, state.pickupTime, state.dropDate, state.dropTime);
+  if(conflicts.length){
+    const nextFree = latestDropOf(conflicts);
+    alert(`Sorry, ${v.name} was just booked for these dates. It's next free from ${fmtDate(nextFree.dropDate)}, ${fmtTime(nextFree.dropTime)} — please choose different dates or another vehicle.`);
+    renderList();
+    return;
+  }
+  state.selectedVehicle = v;
   state.page = 'review';
   state.appliedCoupon = null;
   state.couponInput = '';
@@ -1698,6 +1758,16 @@ function confirmBookingAndSend(paymentExtra){
   const v = state.selectedVehicle;
   const c = state.currentCustomer;
   const b = billingBreakdown(v);
+
+  // Last-moment guard: someone else could have booked this exact vehicle for an
+  // overlapping window in the time between selecting it and confirming here.
+  const conflicts = vehicleConflictingBookings(v.id, state.pickupDate, state.pickupTime, state.dropDate, state.dropTime);
+  if(conflicts.length){
+    const nextFree = latestDropOf(conflicts);
+    alert(`Sorry, ${v.name} was just booked by someone else for these dates. It's next free from ${fmtDate(nextFree.dropDate)}, ${fmtTime(nextFree.dropTime)}. Please go back and choose different dates or another vehicle.`);
+    goTo('list');
+    return;
+  }
 
   const couponDiscount = state.appliedCoupon ? state.appliedCoupon.discount : 0;
   const booking = {
@@ -3327,6 +3397,12 @@ function saveNewBooking(){
   if(!vehicle){ showErr('Please select a vehicle.'); return; }
   const plan = planForDates(d.pickupDate, d.pickupTime, d.dropDate, d.dropTime);
   if(plan.totalHours <= 0){ showErr('Please enter a valid pickup and drop-off date/time (drop-off must be after pickup).'); return; }
+  const conflicts = vehicleConflictingBookings(vehicle.id, d.pickupDate, d.pickupTime, d.dropDate, d.dropTime);
+  if(conflicts.length){
+    const nextFree = latestDropOf(conflicts);
+    showErr(`${vehicle.name} is already booked for part of this window (Booking ${conflicts[0].id}, ${conflicts[0].customerName}). It's next free from ${fmtDate(nextFree.dropDate)}, ${fmtTime(nextFree.dropTime)}.`);
+    return;
+  }
   const effectiveKm = effectiveNewBookingKm(d);
   if(!effectiveKm){ showErr('Please enter a valid km figure.'); return; }
   const billing = billingFor(vehicle, d.pickupDate, d.pickupTime, d.dropDate, d.dropTime, effectiveKm);
@@ -3455,6 +3531,16 @@ function saveExtension(){
   if(!bk) return;
   const newHours = hoursBetweenRaw(bk.pickupDate, bk.pickupTime, d.newDropDate, d.newDropTime);
   if(newHours <= 0){ alert('New drop-off must be after the current pickup date/time.'); return; }
+
+  // Extending this booking's drop-off further out could now run into a future reservation
+  // already on the books for the same vehicle -- exclude this booking itself from the
+  // check (it's being compared against its own new end date, not its current one).
+  const conflicts = vehicleConflictingBookings(bk.vehicleId, bk.pickupDate, bk.pickupTime, d.newDropDate, d.newDropTime, bk.id);
+  if(conflicts.length){
+    const nextFree = latestDropOf(conflicts);
+    alert(`Can't extend that far -- ${bk.vehicleName} is already booked (Booking ${conflicts[0].id}, ${conflicts[0].customerName}) starting before ${fmtDate(nextFree.dropDate)}, ${fmtTime(nextFree.dropTime)}. Choose an earlier new drop-off.`);
+    return;
+  }
 
   const oldDropDate = bk.dropDate, oldDropTime = bk.dropTime;
   bk.extensions = bk.extensions || [];
