@@ -888,9 +888,8 @@ const DEFAULT_PAYMENT_SETTINGS = {
   acceptCash: true,
   acceptUpi: true,
   acceptCard: true,
-  gatewayEnabled: false,
-  gatewayName: '',
-  gatewayNotes: ''
+  razorpayEnabled: false,
+  razorpayKeyId: ''
 };
 
 function loadPaymentSettings(){
@@ -1155,6 +1154,18 @@ function fmtTime(t){
 }
 function money(n){ return '₹' + Math.round(n).toLocaleString('en-IN'); }
 
+// Booking/customer IDs used to be "one more than the highest ID this device currently
+// knows about" -- fine on a single device, but this app syncs across many phones/laptops
+// via Supabase, and a device that hasn't pulled the latest data yet (sync happens in the
+// background, not before every save) would recompute the same "next" ID someone else's
+// device just used elsewhere. Two different signups/bookings would then collide on the
+// same ID and effectively merge into one record. Stamping in the time plus a random
+// suffix makes a collision astronomically unlikely without needing every device to be
+// in sync first.
+function genId(prefix){
+  return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
 // PDF downloads depend on the externally-loaded jsPDF library, which can still be mid-flight
 // (slow network) or may have failed on every CDN mirror. Instead of failing instantly the
 // first time it's not yet ready, this polls for up to ~6 seconds before giving up, so a slow
@@ -1170,6 +1181,69 @@ function ensureJsPDFThen(callback, attempt){
     return;
   }
   setTimeout(function(){ ensureJsPDFThen(callback, attempt + 1); }, 200);
+}
+
+/* ============ RAZORPAY ============
+   Loaded on demand (only once the customer actually wants to pay online) rather than on
+   every page load. This is Razorpay's standard Checkout flow: it opens with just the Key
+   ID and an amount, and hands back a payment ID on success. Without a backend server this
+   site can't create a Razorpay "order" first or verify the payment signature afterwards --
+   that would need a small server (e.g. a Supabase Edge Function) holding the Key Secret.
+   Until then, treat the payment ID this captures as a strong signal, not a guarantee, and
+   reconcile against the Razorpay Dashboard periodically. */
+let razorpayScriptLoaded = false;
+function ensureRazorpayThen(callback){
+  if(window.Razorpay){ callback(); return; }
+  if(razorpayScriptLoaded){ setTimeout(() => ensureRazorpayThen(callback), 200); return; }
+  razorpayScriptLoaded = true;
+  const script = document.createElement('script');
+  script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+  script.onload = callback;
+  script.onerror = () => {
+    razorpayScriptLoaded = false;
+    alert('Could not load the payment gateway -- check your internet connection and try again, or pay in person instead.');
+  };
+  document.head.appendChild(script);
+}
+
+function payOnlineThenConfirm(){
+  if(!state.currentCustomer || !state.agreedTerms || !state.selectedVehicle) return;
+  const p = PAYMENT_SETTINGS;
+  if(!p.razorpayEnabled || !p.razorpayKeyId){ alert('Online payment is not set up yet.'); return; }
+  const v = state.selectedVehicle;
+  const c = state.currentCustomer;
+  const b = billingBreakdown(v);
+  const couponDiscount = state.appliedCoupon ? state.appliedCoupon.discount : 0;
+  const amountRupees = (b.total - couponDiscount) + v.deposit;
+  if(amountRupees <= 0) return;
+
+  const btn = document.getElementById('razorpay-pay-btn');
+  if(btn){ btn.disabled = true; btn.textContent = 'Opening secure payment…'; }
+
+  ensureRazorpayThen(() => {
+    if(btn){ btn.disabled = false; }
+    const rzp = new Razorpay({
+      key: p.razorpayKeyId,
+      amount: Math.round(amountRupees * 100), // paise
+      currency: 'INR',
+      name: '24x7 Bike4U Bike Rentals',
+      description: `${v.name} rental — ${durationLabel(b.totalHours)}`,
+      image: LOGO_BASE64,
+      prefill: { name: c.name, email: c.email, contact: c.mobile },
+      notes: { vehicle: v.name, pickupDate: state.pickupDate, dropDate: state.dropDate },
+      theme: { color: '#F5C21B' },
+      handler: function(response){
+        confirmBookingAndSend({
+          paymentMethod: 'Razorpay (paid online at booking)',
+          razorpayPaymentId: response.razorpay_payment_id,
+        });
+      },
+    });
+    rzp.on('payment.failed', function(response){
+      alert('Payment failed: ' + ((response && response.error && response.error.description) || 'please try again, or pay in person instead.'));
+    });
+    rzp.open();
+  });
 }
 
 // The 80km option in a <=12h booking is a true standalone flat rate (no "/day").
@@ -1543,16 +1617,15 @@ function getClientGeo(){
 
 // Creates the stored, downloadable rental agreement for this booking (tied to the
 // customer's profile) and then hands off to WhatsApp for final confirmation with staff.
-function confirmBookingAndSend(){
+function confirmBookingAndSend(paymentExtra){
   if(!state.currentCustomer || !state.agreedTerms) return;
   const v = state.selectedVehicle;
   const c = state.currentCustomer;
   const b = billingBreakdown(v);
 
-  const maxNum = BOOKINGS.reduce((m,bk) => Math.max(m, parseInt((bk.id||'BK0').replace('BK',''),10) || 0), 0);
   const couponDiscount = state.appliedCoupon ? state.appliedCoupon.discount : 0;
   const booking = {
-    id: 'BK' + (maxNum + 1),
+    id: genId('BK'),
     customerId: c.id,
     customerName: c.name,
     customerEmail: c.email,
@@ -1570,12 +1643,16 @@ function confirmBookingAndSend(){
     couponDiscount: couponDiscount,
     deposit: v.deposit,
     extraKmCharge: v.extraKm,
-    paymentMethod: 'Cash / UPI / Card (collected at pickup/drop-off)',
+    paymentMethod: (paymentExtra && paymentExtra.paymentMethod) || 'Cash / UPI / Card (collected at pickup/drop-off)',
     termsVersion: TERMS_VERSION,
     agreedAt: new Date().toISOString(),
     customerIp: 'Detecting…',
     customerGeo: 'Detecting…',
   };
+  if(paymentExtra && paymentExtra.razorpayPaymentId){
+    booking.paidOnline = true;
+    booking.razorpayPaymentId = paymentExtra.razorpayPaymentId;
+  }
   BOOKINGS.push(booking);
   saveBookings();
   notifyIfNewBooking(booking);
@@ -1831,9 +1908,8 @@ function submitCustomerSignup(){
     }
   }
 
-  const maxNum = CUSTOMERS.reduce((m,c) => Math.max(m, parseInt((c.id||'C0').replace('C',''),10) || 0), 0);
   const customer = {
-    id: 'C' + (maxNum + 1),
+    id: genId('C'),
     email, password: d.password,
     name: d.name.trim(),
     mobile, emergency,
@@ -2337,7 +2413,7 @@ function renderAdmin(){
             : state.adminTab === 'terms'
             ? `Version ${TERMS_VERSION} · shown to customers at booking and on the Terms page`
             : state.adminTab === 'payments'
-            ? `Accepted: ${acceptedMethodsLabel()} · online gateway ${PAYMENT_SETTINGS.gatewayEnabled ? 'in setup' : 'not connected'}`
+            ? `Accepted: ${acceptedMethodsLabel()} · Razorpay ${PAYMENT_SETTINGS.razorpayEnabled && PAYMENT_SETTINGS.razorpayKeyId ? 'live' : 'not set up'}`
             : state.adminTab === 'coupons'
             ? `${COUPONS.length} coupon${COUPONS.length === 1 ? '' : 's'} · ${COUPONS.filter(c=>c.active).length} active`
             : `${VEHICLES.length} vehicles · ${VEHICLES.filter(v=>v.hidden).length} hidden · ${VEHICLES.filter(v=>v.soldOut).length} sold out · ${VEHICLES.filter(v=>vehicleRentalStatus(v.id).rented).length} rented out now${VEHICLES.filter(v=>vehicleRentalStatus(v.id).overdue).length ? ` · ${VEHICLES.filter(v=>vehicleRentalStatus(v.id).overdue).length} overdue` : ''}`}</div>
@@ -2759,9 +2835,8 @@ function saveNewCustomerManually(){
   const email = d.email.trim().toLowerCase();
   if(email && CUSTOMERS.some(c => c.email === email)){ showErr('A customer with this email already exists.'); return; }
 
-  const maxNum = CUSTOMERS.reduce((m,c) => Math.max(m, parseInt((c.id||'C0').replace('C',''),10) || 0), 0);
   const customer = {
-    id: 'C' + (maxNum + 1),
+    id: genId('C'),
     email, password: '',
     name: d.name.trim(),
     mobile, emergency,
@@ -2831,6 +2906,7 @@ function bookingSummaryCardHtml(bk){
       <div class="booking-card-row">
         <span>Rented: <b>${fmtDate(bk.pickupDate)}, ${fmtTime(bk.pickupTime)}</b></span>
         <span>Till: <b>${fmtDate(bk.dropDate)}, ${fmtTime(bk.dropTime)}</b></span>
+        ${bk.paidOnline ? `<span style="color:var(--teal);">🔒 Paid online (Razorpay)</span>` : ''}
       </div>
     </div>
   `;
@@ -3124,9 +3200,8 @@ function saveNewBooking(){
   const billing = billingFor(vehicle, d.pickupDate, d.pickupTime, d.dropDate, d.dropTime, effectiveKm);
   const discountAmount = newBookingDiscountAmount(d, billing.total);
 
-  const maxNum = BOOKINGS.reduce((m,bk) => Math.max(m, parseInt((bk.id||'BK0').replace('BK',''),10) || 0), 0);
   const booking = {
-    id: 'BK' + (maxNum + 1),
+    id: genId('BK'),
     customerId: customer.id,
     customerName: customer.name,
     customerEmail: customer.email,
@@ -3398,19 +3473,23 @@ function renderPaymentsAdminHtml(){
         <label style="display:flex;align-items:center;gap:8px;font-size:14px;"><input type="checkbox" ${p.acceptCard ? 'checked' : ''} onchange="togglePaymentMethod('acceptCard', this.checked)"> 💳 Card</label>
       </div>
 
-      <h3>Online payment gateway</h3>
-      <p class="field-hint" style="margin-bottom:14px;">Not connected yet -- this is a placeholder so it's ready to switch on once a gateway (e.g. Razorpay, Instamojo, Stripe) is integrated. Turning this on today only changes the wording shown to customers; it does not process any real payments.</p>
-      <label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:14px;"><input type="checkbox" ${p.gatewayEnabled ? 'checked' : ''} onchange="togglePaymentGateway(this.checked)"> Show "online payment coming soon" as "in setup" with a gateway name</label>
-      <div class="field">
-        <label>Gateway name (optional, e.g. Razorpay)</label>
-        <input type="text" id="gateway-name-input" value="${p.gatewayName}" placeholder="e.g. Razorpay" ${p.gatewayEnabled ? '' : 'disabled style="opacity:.6;"'}>
+      <h3>Razorpay online payment</h3>
+      <div class="note-box" style="margin-bottom:14px;border-color:var(--yellow);">
+        <strong style="display:block;margin-bottom:6px;">Before you turn this on</strong>
+        <div style="font-size:13px;line-height:1.7;color:var(--text-dim);">
+          Paste your <strong style="color:var(--text);">Key ID</strong> only (starts with <code>rzp_live_</code> or <code>rzp_test_</code>) — that's the public half of your Razorpay API keys and is safe to store here.
+          <strong style="color:#F3A19C;"> Never paste your Key Secret anywhere in this app</strong> — it must stay private. Get your Key ID from Razorpay Dashboard → Settings → API Keys.
+          <br><br>
+          This site has no backend server, so payments go through Razorpay's Checkout directly from the customer's browser — quick to set up, but it means there's no server-side step confirming the payment actually cleared before the booking is created. Cross-check payments against your Razorpay Dashboard periodically. For guaranteed server-verified payments, a small Supabase Edge Function would be needed — ask if you'd like that built.
+        </div>
       </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:14px;"><input type="checkbox" ${p.razorpayEnabled ? 'checked' : ''} onchange="toggleRazorpay(this.checked)"> Enable "Pay online now" with Razorpay on the booking payment page</label>
       <div class="field">
-        <label>Internal notes (not shown to customers)</label>
-        <textarea id="gateway-notes-input" rows="3" style="width:100%;font-family:inherit;font-size:13px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);" placeholder="e.g. Waiting on API keys from Razorpay support" ${p.gatewayEnabled ? '' : 'disabled style="opacity:.6;"'}>${p.gatewayNotes}</textarea>
+        <label>Razorpay Key ID</label>
+        <input type="text" id="razorpay-keyid-input" value="${p.razorpayKeyId}" placeholder="rzp_live_xxxxxxxxxxxxxx" ${p.razorpayEnabled ? '' : 'disabled style="opacity:.6;"'}>
       </div>
       <div style="margin-top:10px;">
-        <button class="btn-primary" onclick="saveGatewaySettings()">Save gateway details</button>
+        <button class="btn-primary" onclick="saveRazorpaySettings()">Save Razorpay settings</button>
       </div>
     </div>
   `;
@@ -3422,15 +3501,14 @@ function togglePaymentMethod(field, checked){
   renderAdmin();
 }
 
-function togglePaymentGateway(checked){
-  PAYMENT_SETTINGS.gatewayEnabled = checked;
+function toggleRazorpay(checked){
+  PAYMENT_SETTINGS.razorpayEnabled = checked;
   savePaymentSettings();
   renderAdmin();
 }
 
-function saveGatewaySettings(){
-  PAYMENT_SETTINGS.gatewayName = (document.getElementById('gateway-name-input').value || '').trim();
-  PAYMENT_SETTINGS.gatewayNotes = (document.getElementById('gateway-notes-input').value || '').trim();
+function saveRazorpaySettings(){
+  PAYMENT_SETTINGS.razorpayKeyId = (document.getElementById('razorpay-keyid-input').value || '').trim();
   savePaymentSettings();
   renderAdmin();
 }
@@ -3496,11 +3574,18 @@ function renderPaymentPage(){
       <div class="note-box" style="margin-bottom:${inBookingFlow ? '20px' : '0'};">
         <strong style="display:block;margin-bottom:6px;font-size:14px;">Online payment</strong>
         <div style="font-size:13px;color:var(--text-dim);line-height:1.7;">
-          ${p.gatewayEnabled
-            ? `Online payment via ${p.gatewayName || 'our payment gateway'} is being set up and will be available here soon.`
+          ${p.razorpayEnabled && p.razorpayKeyId
+            ? `Pay online now via Razorpay (cards, UPI, netbanking, wallets) — or skip this and pay ${acceptedMethodsLabel()} in person at pickup/drop-off instead.`
             : `We don't yet accept online/gateway payment through this app — this is coming soon. For now, please pay using ${acceptedMethodsLabel()} at pickup/drop-off.`}
         </div>
       </div>
+
+      ${inBookingFlow && p.razorpayEnabled && p.razorpayKeyId ? `
+      <button class="btn-primary" id="razorpay-pay-btn" onclick="payOnlineThenConfirm()" style="display:flex;align-items:center;justify-content:center;gap:8px;">
+        🔒 Pay ${money(billingBreakdown(state.selectedVehicle).total + state.selectedVehicle.deposit)} online now (Razorpay) &amp; confirm booking
+      </button>
+      <div class="field-hint" style="text-align:center;margin:8px 0 4px;">or</div>
+      ` : ''}
 
       ${inBookingFlow ? `
       <button class="btn-whatsapp" onclick="confirmBookingAndSend()">
@@ -3645,6 +3730,7 @@ function generateBookingAgreementPDF(id){
     ['Deposit (refundable)', money(bk.deposit)],
     ['Extra km charge', `₹${bk.extraKmCharge}/km`],
     ['Payment method', bk.paymentMethod],
+    ...(bk.razorpayPaymentId ? [['Razorpay payment ID', bk.razorpayPaymentId]] : []),
   ];
   doc.setFontSize(11);
   fields.forEach(([label, value]) => {
@@ -4325,9 +4411,8 @@ function submitNewVehicle(){
     return;
   }
 
-  const maxNum = VEHICLES.reduce((m,v) => Math.max(m, parseInt(v.id.replace('V',''),10) || 0), 0);
   VEHICLES.push({
-    id: 'V' + (maxNum + 1),
+    id: genId('V'),
     name: d.name.trim(),
     colour: d.colour.trim(),
     rc: d.rc.trim(),
