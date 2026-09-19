@@ -1,0 +1,12 @@
+{
+  "name": "24x7 Bike4U Bike Rentals",
+  "short_name": "Bike4U",
+  "description": "Bike & scooter rental in Indore, open 24x7.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#14191B",
+  "theme_color": "#F5C21B",
+  "icons": [
+    { "src": "/og-image.png", "sizes": "240x240", "type": "image/png" }
+  ]
+}
