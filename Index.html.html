@@ -2486,7 +2486,7 @@ function renderAdmin(){
           <div class="sub">${state.adminTab === 'customers'
             ? `${CUSTOMERS.length} customer${CUSTOMERS.length === 1 ? '' : 's'} · ${CUSTOMERS.filter(c=>verificationStatusOf(c)!=='verified').length} not yet verified`
             : state.adminTab === 'bookings'
-            ? `${BOOKINGS.length} booking${BOOKINGS.length === 1 ? '' : 's'} · Cash, UPI or Card on pickup/drop-off`
+            ? `${BOOKINGS.length} booking${BOOKINGS.length === 1 ? '' : 's'}${orphanedBookings().length ? ` · ⚠ ${orphanedBookings().length} missing customer profile${orphanedBookings().length===1?'':'s'}` : ''}`
             : state.adminTab === 'terms'
             ? `Version ${TERMS_VERSION} · shown to customers at booking and on the Terms page`
             : state.adminTab === 'payments'
@@ -2724,6 +2724,10 @@ function renderCustomersAdminHtml(){
     ${!lastSyncOk.customers ? `
     <div class="err" style="display:block;margin-bottom:14px;">
       ⚠ The last customer save to the shared cloud database failed (often caused by very large uploaded photos). That signup may only exist on the customer's own device until this is retried. <button class="btn-ghost" onclick="saveCustomers();">Retry now</button>
+    </div>` : ''}
+    ${orphanedBookings().length ? `
+    <div class="err" style="display:block;margin-bottom:14px;">
+      ⚠ ${orphanedBookings().length} booking${orphanedBookings().length===1?'':'s'} ${orphanedBookings().length===1?'has':'have'} no matching customer profile here — that's the same sync issue: the booking saved but the customer's profile didn't reach this device/the cloud. Go to <strong>Bookings</strong> and open the affected booking(s) to recreate the profile from what's on the booking record.
     </div>` : ''}
     <div class="add-card" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:10px;">
@@ -2970,6 +2974,7 @@ function bookingsListInnerHtml(){
 function bookingSummaryCardHtml(bk){
   const paid = (bk.rentalTotal || 0) + (bk.pickupCharge || 0) + (bk.dropCharge || 0) + (bk.helmetCharge || 0)
     + (bk.extensions || []).reduce((s, e) => s + (e.charge || 0), 0);
+  const missingProfile = !CUSTOMERS.some(c => c.id === bk.customerId);
   return `
     <div class="booking-card" onclick="toggleBookingExpand('${bk.id}')">
       <div class="booking-card-top">
@@ -2985,8 +2990,58 @@ function bookingSummaryCardHtml(bk){
         <span>Till: <b>${fmtDate(bk.dropDate)}, ${fmtTime(bk.dropTime)}</b></span>
         ${bk.paidOnline ? `<span style="color:var(--teal);">🔒 Paid online (Razorpay)</span>` : ''}
       </div>
+      ${missingProfile ? `
+      <div class="err" style="display:block;margin-top:8px;" onclick="event.stopPropagation()">
+        ⚠ This customer's profile is missing from Customers (likely a failed cloud sync when they signed up). Their name/email/mobile from this booking are still on record.
+        <button class="btn-ghost" style="margin-top:6px;" onclick="recoverCustomerFromBooking('${bk.id}')">Recreate customer profile from this booking</button>
+      </div>` : ''}
     </div>
   `;
+}
+
+// A booking whose customerId has no matching entry in CUSTOMERS -- the actual signature
+// of the sync bug fixed in an earlier version (a customer's profile silently failed to
+// save to the cloud, most often when large KYC photos pushed the payload over Supabase's
+// size limit, while their much smaller booking record saved fine). Lets admin see, at a
+// glance, whether any bookings are currently in that state.
+function orphanedBookings(){
+  return BOOKINGS.filter(bk => !CUSTOMERS.some(c => c.id === bk.customerId));
+}
+
+// Rebuilds a bare-bones customer profile from what the booking itself already captured
+// (name, email, mobile) -- the KYC photos and address aren't recoverable this way since
+// they were never in the booking record, so the profile comes back marked pending
+// verification for admin to follow up with the customer on.
+function recoverCustomerFromBooking(bookingId){
+  const bk = BOOKINGS.find(b => b.id === bookingId);
+  if(!bk) return;
+  const existing = CUSTOMERS.find(c => c.id === bk.customerId || (bk.customerEmail && c.email === bk.customerEmail));
+  if(existing){
+    // Profile actually exists (e.g. it arrived via sync since this button was rendered) --
+    // just repoint the booking at it rather than creating a duplicate.
+    bk.customerId = existing.id;
+    saveBookings();
+    renderAdmin();
+    return;
+  }
+  const customer = {
+    id: genId('C'),
+    email: bk.customerEmail || '',
+    password: '',
+    name: bk.customerName || 'Unnamed',
+    mobile: bk.customerMobile || '',
+    emergency: '',
+    address: '',
+    selfie: null, aadharFront: null, aadharBack: null, licenseFront: null, licenseBack: null,
+    createdAt: bk.agreedAt || new Date().toISOString(),
+    verificationStatus: 'pending',
+    recoveredFromBooking: bk.id,
+  };
+  CUSTOMERS.push(customer);
+  bk.customerId = customer.id;
+  saveCustomers();
+  saveBookings();
+  renderAdmin();
 }
 
 function bookingCardHtml(bk){
