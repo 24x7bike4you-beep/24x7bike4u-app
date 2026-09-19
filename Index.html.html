@@ -62,6 +62,7 @@
 </script>
 
 <link rel="icon" type="image/png" href="/og-image.png">
+<style id="anim-guard"></style>
 <script>
 // Load jsPDF from the first CDN that responds. If cdnjs is blocked/unreachable on this
 // network, this automatically falls back to jsDelivr, then unpkg, instead of leaving
@@ -694,7 +695,7 @@ function saveCustomers(){
     // Supabase's size limit) means this signup only exists on this one device/browser --
     // it will never reach the admin's browser. Surface that immediately rather than
     // leaving it to be discovered later as a "missing customer".
-    if(!ok && state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) render();
+    if(!ok && state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
   });
 }
 
@@ -1164,6 +1165,27 @@ function userIsActivelyEditing(){
   if(!ae) return false;
   const tag = ae.tagName;
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+}
+
+// A background refresh (the 60s poll, realtime pushes) rebuilds the page the exact same
+// way a real navigation does -- so without this, the card pop-in/fade-in entrance
+// animation added elsewhere would replay every single time, which is what actually reads
+// as "flickering" every minute. Setting this flag right before a *silent* render call
+// (and clearing it right after) makes that one render skip the entrance animation, while
+// any genuine navigation still gets it. The guard is applied via a stylesheet rule rather
+// than toggled on individual elements, and only ever changes state at the very start of a
+// render -- i.e. in the same synchronous step that replaces the old elements -- so the
+// browser never gets a chance to paint an in-between state, and nothing already on screen
+// visibly restarts its animation.
+let silentRefreshFlag = false;
+function applyAnimGuard(){
+  const el = document.getElementById('anim-guard');
+  if(el) el.textContent = silentRefreshFlag ? '#app *{animation:none !important;}' : '';
+}
+function silentRefresh(fn){
+  silentRefreshFlag = true;
+  applyAnimGuard();
+  try{ fn(); } finally { silentRefreshFlag = false; }
 }
 
 // Booking/customer IDs used to be "one more than the highest ID this device currently
@@ -2318,7 +2340,7 @@ async function subscribeAdminRealtime(){
           BOOKINGS = arr;
           try{ localStorage.setItem(BOOKINGS_STORAGE_KEY, JSON.stringify(BOOKINGS)); }catch(e){}
           freshOnes.forEach(notifyIfNewBooking);
-          if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) render();
+          if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
         }
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_data', filter: 'key=eq.customers' }, (payload) => {
@@ -2330,7 +2352,7 @@ async function subscribeAdminRealtime(){
           CUSTOMERS = arr;
           try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
           freshOnes.forEach(notifyIfNewCustomer);
-          if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) render();
+          if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
         }
       })
       .subscribe();
@@ -2396,7 +2418,7 @@ async function subscribeCustomerRealtime(){
         NOTIFICATIONS = arr;
         try{ localStorage.setItem(NOTIFICATIONS_STORAGE_KEY, JSON.stringify(NOTIFICATIONS)); }catch(e){}
         freshOnes.forEach(notifyIfNewForCustomer);
-        if(state.currentCustomer && state.page === 'customer-account') renderCustomerAccount();
+        if(state.currentCustomer && state.page === 'customer-account' && !userIsActivelyEditing()) silentRefresh(renderCustomerAccount);
       })
       .subscribe();
   }catch(e){ console.warn('Bike4u: could not subscribe to realtime customer notifications:', e); }
@@ -2411,6 +2433,7 @@ function onCustomerAuthenticated(){
 
 /* ============ ADMIN: PANEL ============ */
 function renderAdmin(){
+  applyAnimGuard();
   if(!state.isAdmin){ goTo('admin-login'); return; }
 
   document.getElementById('app').innerHTML = `
@@ -4460,6 +4483,7 @@ window.addEventListener('hashchange', function(){
   }
 });
 function render(){
+  applyAnimGuard();
   if(state.page !== 'home' && (tourActive || document.getElementById('tour-tooltip'))){
     tourActive = false;
     removeTourUI();
@@ -4483,7 +4507,7 @@ function render(){
     const unread = state.currentCustomer ? NOTIFICATIONS.filter(n => n.customerId === state.currentCustomer.id && !n.read).length : 0;
     headerLoginBtn.textContent = state.currentCustomer ? `My account${unread ? ` (${unread})` : ''}` : 'Login';
   }
-  window.scrollTo({top:0, behavior:'smooth'});
+  if(!silentRefreshFlag) window.scrollTo({top:0, behavior:'smooth'});
 }
 
 /* ============ GUIDED TOUR ============
@@ -4599,7 +4623,7 @@ function restartTour(){
   setInterval(() => {
     checkOverdueBookings();
     syncFromSupabase(); // periodic pull so new signups/bookings from other devices show up without a manual reload
-    if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) render();
+    if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
   }, 60000);
 })();
 </script>
