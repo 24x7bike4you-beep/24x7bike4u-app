@@ -3022,7 +3022,7 @@ function toggleBookingExpand(id){
 }
 
 function blankNewBookingDraft(){
-  return { customerId: '', vehicleId: '', pickupDate: '', pickupTime: '10:00', dropDate: '', dropTime: '10:00', kmPackage: 150, customKm: '', pickupCharge: 0, dropCharge: 0, helmetCharge: 0, discountType: 'flat', discountValue: 0, shareOnWhatsapp: true };
+  return { customerId: '', vehicleId: '', pickupDate: '', pickupTime: '10:00', dropDate: '', dropTime: '10:00', kmPackage: null, customKm: '', pickupCharge: 0, dropCharge: 0, helmetCharge: 0, discountType: 'flat', discountValue: 0, shareOnWhatsapp: true };
 }
 let newBookingDraft = null;
 let newBookingCustomerSearch = '';
@@ -3089,7 +3089,7 @@ function renderNewBookingFormHtml(){
   const vehicle = VEHICLES.find(v => v.id === d.vehicleId);
   const plan = planForDates(d.pickupDate, d.pickupTime, d.dropDate, d.dropTime);
   const kmOptions = plan.kmOptions;
-  if(d.kmPackage !== 'custom' && !kmOptions.includes(d.kmPackage)){ d.kmPackage = kmOptions.includes(150) ? 150 : kmOptions[0]; }
+  if(d.kmPackage !== 'custom' && (d.kmPackage === null || !kmOptions.includes(d.kmPackage))){ d.kmPackage = kmOptions[0]; } // lowest option by default, until admin picks a different one
   const effectiveKm = effectiveNewBookingKm(d);
   const billing = vehicle ? billingFor(vehicle, d.pickupDate, d.pickupTime, d.dropDate, d.dropTime, effectiveKm) : null;
   const selectedCustomer = CUSTOMERS.find(c => c.id === d.customerId);
@@ -4580,7 +4580,7 @@ function restartTour(){
   const drop = new Date(now.getTime() + 24*3600*1000);
   state.dropDate = drop.toISOString().slice(0,10);
   state.dropTime = state.pickupTime;
-  syncKmPackage(getPlan()); // default to the lowest available km option, not a fixed 150km
+  state.kmPackage = getPlan().kmOptions[0]; // lowest km option selected by default; customer can raise it from there
   restoreCustomerSession();
   restoreAdminSession();
   const initialHash = location.hash.slice(1);
