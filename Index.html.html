@@ -609,6 +609,31 @@ async function sbSet(key, value){
 // overwrites the in-memory arrays + localStorage cache, and re-renders.
 // If Supabase has no data yet (brand-new project), it pushes this
 // browser's current data up so other devices pick it up from then on.
+// Merges two record arrays (each item has a unique `id`) into the union of both, instead
+// of one wholesale replacing the other -- this is the real fix for customers/bookings that
+// go missing on one device but not another. The previous approach ("take whichever copy I
+// just fetched") had a real race: sync runs constantly in the background (page load, every
+// 60s, realtime pushes), so a fetch that started an instant *before* a signup/booking
+// finished saving would return a snapshot missing that brand-new record, and blindly
+// replacing the local array with it would erase the record from this device's memory even
+// though it may already be safely on the server. Merging by id can never lose a record
+// either side has; when the same id exists on both sides, whichever has the newer
+// modified/created timestamp wins, so genuine edits from elsewhere still come through.
+function mergeById(local, remote, tsFields){
+  const byId = new Map();
+  const tsOf = r => {
+    for(const f of tsFields){ if(r && r[f]) return new Date(r[f]).getTime() || 0; }
+    return 0;
+  };
+  (Array.isArray(local) ? local : []).forEach(r => { if(r && r.id) byId.set(r.id, r); });
+  (Array.isArray(remote) ? remote : []).forEach(r => {
+    if(!r || !r.id) return;
+    const existing = byId.get(r.id);
+    if(!existing || tsOf(r) >= tsOf(existing)) byId.set(r.id, r);
+  });
+  return Array.from(byId.values());
+}
+
 async function syncFromSupabase(){
   const [remoteVehicles, remoteCustomers, remoteBookings, remoteNotifications, remotePaymentSettings, remoteTerms] = await Promise.all([
     sbGet('vehicles'), sbGet('customers'), sbGet('bookings'), sbGet('notifications'), sbGet('paymentSettings'), sbGet('terms')
@@ -621,21 +646,25 @@ async function syncFromSupabase(){
     sbSet('vehicles', VEHICLES);
   }
 
-  // Guarded the same way as vehicles above: an empty array from Supabase here almost
-  // always means a transient read glitch, not that every customer vanished, so we never
-  // let it wipe out customers this browser already has. Only a genuinely non-empty
-  // remote list -- or this browser having nothing to lose -- is accepted.
+  // Guarded the same way as vehicles above, plus merged rather than swapped wholesale --
+  // see mergeById's comment for why a plain replace was the real bug here.
   if(Array.isArray(remoteCustomers) && (remoteCustomers.length || CUSTOMERS.length === 0)){
-    CUSTOMERS = remoteCustomers;
+    const merged = mergeById(CUSTOMERS, remoteCustomers, ['modifiedAt', 'createdAt']);
+    const localHadExtra = merged.length > remoteCustomers.length;
+    CUSTOMERS = merged;
     try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
     lastSyncOk.customers = true;
+    if(localHadExtra) sbSet('customers', CUSTOMERS); // this device had a customer the cloud didn't yet -- push the merged list back up so it catches up
   } else {
     sbSet('customers', CUSTOMERS).then(ok => { lastSyncOk.customers = ok; if(state.isAdmin && state.page==='admin') render(); });
   }
 
   if(Array.isArray(remoteBookings) && (remoteBookings.length || BOOKINGS.length === 0)){
-    BOOKINGS = remoteBookings;
+    const merged = mergeById(BOOKINGS, remoteBookings, ['modifiedAt', 'agreedAt']);
+    const localHadExtra = merged.length > remoteBookings.length;
+    BOOKINGS = merged;
     try{ localStorage.setItem(BOOKINGS_STORAGE_KEY, JSON.stringify(BOOKINGS)); }catch(e){}
+    if(localHadExtra) sbSet('bookings', BOOKINGS);
   } else {
     sbSet('bookings', BOOKINGS);
   }
@@ -2616,7 +2645,7 @@ async function subscribeAdminRealtime(){
         const existingIds = new Set(BOOKINGS.map(b => b.id));
         const freshOnes = arr.filter(b => !existingIds.has(b.id));
         if(freshOnes.length){
-          BOOKINGS = arr;
+          BOOKINGS = mergeById(BOOKINGS, arr, ['modifiedAt', 'agreedAt']);
           try{ localStorage.setItem(BOOKINGS_STORAGE_KEY, JSON.stringify(BOOKINGS)); }catch(e){}
           freshOnes.forEach(notifyIfNewBooking);
           if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
@@ -2628,7 +2657,7 @@ async function subscribeAdminRealtime(){
         const existingIds = new Set(CUSTOMERS.map(c => c.id));
         const freshOnes = arr.filter(c => !existingIds.has(c.id));
         if(freshOnes.length){
-          CUSTOMERS = arr;
+          CUSTOMERS = mergeById(CUSTOMERS, arr, ['modifiedAt', 'createdAt']);
           try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
           freshOnes.forEach(notifyIfNewCustomer);
           if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
