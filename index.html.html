@@ -1253,10 +1253,31 @@ function applyAnimGuard(){
   const el = document.getElementById('anim-guard');
   if(el) el.textContent = silentRefreshFlag ? '#app *{animation:none !important;}' : '';
 }
+
+// Suppressing the entrance animation (above) stops the "pop" every element does on
+// insert, but a full innerHTML swap of a large panel (photos, many cards) still costs the
+// browser a real chunk of layout/paint work, and that work becoming visible mid-way is
+// what actually reads as a flicker -- a content jump/flash, not an animation. Fading #app
+// to invisible first means that reflow work happens while nothing is shown, then fading
+// back in only once the new content is already laid out, so the swap itself is masked
+// rather than merely un-animated.
 function silentRefresh(fn){
-  silentRefreshFlag = true;
-  applyAnimGuard();
-  try{ fn(); } finally { silentRefreshFlag = false; }
+  const appEl = document.getElementById('app');
+  const doRender = () => {
+    silentRefreshFlag = true;
+    applyAnimGuard();
+    try{ fn(); } finally { silentRefreshFlag = false; }
+  };
+  if(!appEl){ doRender(); return; }
+  appEl.style.transition = 'opacity .18s ease';
+  appEl.style.opacity = '0';
+  setTimeout(() => {
+    doRender();
+    requestAnimationFrame(() => {
+      const el = document.getElementById('app'); // doRender() replaced the node's contents, not the node itself
+      if(el) el.style.opacity = '1';
+    });
+  }, 190);
 }
 
 // navigator.onLine only reflects "no network adapter at all", not a slow/flaky one, but
@@ -4803,13 +4824,18 @@ function restartTour(){
   syncFromSupabase();
   maybeStartHomeTour();
 
-  // Keep the admin Fleet view's "Rented until.../Available now" badges accurate even
-  // when nothing else changes -- a vehicle becomes free purely because time passed, not
-  // because any booking record was edited, so a periodic re-render is needed to catch it.
+  // Keep the "Rented until.../Available now" badges (admin Fleet tab and the customer
+  // vehicle list) accurate even when nothing else changes -- a vehicle becomes free purely
+  // because time passed, not because any record was edited, so a periodic re-render is
+  // needed to catch it. Narrowed to just the two screens that actually show those badges,
+  // since a re-render anywhere else on a timer would be visible churn for no reason --
+  // everything else (bookings, customers, coupons) already refreshes via the realtime
+  // handlers above when there's genuinely new data, not on a blind timer.
   setInterval(() => {
     checkOverdueBookings();
     syncFromSupabase(); // periodic pull so new signups/bookings from other devices show up without a manual reload
-    if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
+    const onFleetView = (state.isAdmin && state.page === 'admin' && state.adminTab === 'vehicles') || state.page === 'list';
+    if(onFleetView && !userIsActivelyEditing()) silentRefresh(render);
   }, 60000);
 })();
 </script>
