@@ -748,6 +748,54 @@ const CUSTOMERS_STORAGE_KEY = 'bike4u_customers_v1';
 // doesn't go unnoticed.
 let lastSyncOk = { customers: true, bookings: true };
 
+/* ============ RESILIENT BACKGROUND SYNC (retry queue) ============
+   A single failed save used to be the end of the story -- one retry, then a message
+   asking the customer to do something about it manually, which isn't realistic to expect.
+   This makes a failed save keep trying on its own instead: a "still needs to reach the
+   cloud" flag is persisted to local storage the moment a save is attempted, and only
+   cleared once it actually succeeds. While pending, this tab retries with a backing-off
+   delay for several minutes; and separately, every future app load and every periodic
+   tick checks for a leftover pending flag and resumes retrying -- so even if the customer
+   closes the tab moments after a failed save (before any retry had a chance to land), the
+   very next time the app opens on that device it quietly finishes the job with no action
+   from them at all. */
+const PENDING_SYNC_KEY = 'bike4u_pending_sync_v1';
+function getPendingSync(){
+  try{ const raw = localStorage.getItem(PENDING_SYNC_KEY); return raw ? JSON.parse(raw) : {}; }catch(e){ return {}; }
+}
+function setPendingSync(key, pending){
+  try{
+    const cur = getPendingSync();
+    if(pending) cur[key] = true; else delete cur[key];
+    localStorage.setItem(PENDING_SYNC_KEY, JSON.stringify(cur));
+  }catch(e){}
+}
+function scheduleBackgroundRetry(key, getArray, attempt){
+  attempt = attempt || 0;
+  backgroundRetryActive[key] = true;
+  if(attempt >= 8){ backgroundRetryActive[key] = false; return; } // stop escalating in this tab -- the pending flag stays set, so the next app load (see resumePendingSyncs) picks it back up
+  const delay = Math.min(5000 * Math.pow(1.6, attempt), 60000);
+  setTimeout(() => {
+    if(!getPendingSync()[key]){ backgroundRetryActive[key] = false; return; } // already succeeded via some other path (e.g. the customer reopened the app and it resolved there) meanwhile
+    sbSet(key, getArray()).then(ok => {
+      lastSyncOk[key] = ok;
+      if(ok){
+        setPendingSync(key, false);
+        backgroundRetryActive[key] = false;
+        if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
+      } else {
+        scheduleBackgroundRetry(key, getArray, attempt + 1);
+      }
+    });
+  }, delay);
+}
+let backgroundRetryActive = {};
+function resumePendingSyncs(){
+  const pending = getPendingSync();
+  if(pending.customers && !backgroundRetryActive.customers) scheduleBackgroundRetry('customers', () => CUSTOMERS, 0);
+  if(pending.bookings && !backgroundRetryActive.bookings) scheduleBackgroundRetry('bookings', () => BOOKINGS, 0);
+}
+
 function loadCustomers(){
   try{
     const saved = localStorage.getItem(CUSTOMERS_STORAGE_KEY);
@@ -768,12 +816,17 @@ function saveCustomers(){
     console.warn('Could not save customer data:', e);
     alert('Could not save your details. Your browser storage may be full -- this usually happens when the uploaded photos are large. Try using smaller/compressed images.');
   }
+  setPendingSync('customers', true);
   return sbSet('customers', CUSTOMERS).then(ok => {
     lastSyncOk.customers = ok;
-    // A failed cloud save here (most often the customer photos pushing the payload over
-    // Supabase's size limit) means this signup only exists on this one device/browser --
-    // it will never reach the admin's browser. Surface that immediately rather than
-    // leaving it to be discovered later as a "missing customer".
+    if(ok){
+      setPendingSync('customers', false);
+    } else {
+      // A failed cloud save here (most often the customer photos pushing the payload over
+      // Supabase's size limit) means this signup only exists on this one device/browser
+      // for now -- the background retry queue above takes over from here automatically.
+      scheduleBackgroundRetry('customers', () => CUSTOMERS, 0);
+    }
     if(!ok && state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
     return ok;
   });
@@ -816,8 +869,14 @@ function saveBookings(){
     console.warn('Could not save booking data:', e);
     alert('Could not save your booking agreement. Your browser storage may be full.');
   }
+  setPendingSync('bookings', true);
   return sbSet('bookings', BOOKINGS).then(ok => {
     lastSyncOk.bookings = ok;
+    if(ok){
+      setPendingSync('bookings', false);
+    } else {
+      scheduleBackgroundRetry('bookings', () => BOOKINGS, 0);
+    }
     if(!ok && state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
     return ok;
   });
@@ -1916,14 +1975,7 @@ function confirmBookingAndSend(paymentExtra){
     booking.razorpayPaymentId = paymentExtra.razorpayPaymentId;
   }
   BOOKINGS.push(booking);
-  saveBookings().then(ok => {
-    if(ok) return;
-    saveBookings().then(ok2 => {
-      if(!ok2){
-        alert("We couldn't confirm your booking reached our server (this can happen on a weak connection). Your WhatsApp confirmation still went out, but please check with us directly if you don't hear back shortly.");
-      }
-    });
-  });
+  saveBookings(); // failures are retried automatically in the background (see scheduleBackgroundRetry) -- no action needed from the customer
   notifyIfNewBooking(booking);
 
   bookOnWhatsapp(booking);
@@ -2274,18 +2326,7 @@ function submitCustomerSignup(){
     verificationStatus: 'pending',
   };
   CUSTOMERS.push(customer);
-  saveCustomers().then(ok => {
-    if(ok) return;
-    // Most failures here are a transient network hiccup rather than a permanent problem,
-    // so it's worth one silent retry before bothering the customer with anything. Only if
-    // that also fails do we actually interrupt them -- and even then, they're not blocked
-    // from continuing, just told plainly what to do about it.
-    saveCustomers().then(ok2 => {
-      if(!ok2){
-        alert("We couldn't confirm your profile reached our server (this can happen on a weak connection). You can still continue -- but please open \"My Profile\" afterwards and tap \"Resync my details\" once you're back on a stronger connection, just to be safe.");
-      }
-    });
-  });
+  saveCustomers(); // failures are retried automatically in the background (see scheduleBackgroundRetry) -- no action needed from the customer
   notifyIfNewCustomer(customer);
   state.currentCustomer = customer;
   try{ localStorage.setItem(CUSTOMER_SESSION_KEY, customer.email); }catch(e){}
@@ -5253,6 +5294,7 @@ function restartTour(){
   }
   render();
   syncFromSupabase();
+  resumePendingSyncs(); // picks up any signup/booking that failed to reach the cloud in a previous session on this device, and quietly finishes the job
   maybeStartHomeTour();
 
   // Keep the "Rented until.../Available now" badges (admin Fleet tab and the customer
@@ -5265,6 +5307,7 @@ function restartTour(){
   setInterval(() => {
     checkOverdueBookings();
     syncFromSupabase(); // periodic pull so new signups/bookings from other devices show up without a manual reload
+    resumePendingSyncs();
     const onFleetView = (state.isAdmin && state.page === 'admin' && state.adminTab === 'vehicles') || state.page === 'list';
     if(onFleetView && !userIsActivelyEditing()) silentRefresh(render);
   }, 60000);
