@@ -746,7 +746,7 @@ const CUSTOMERS_STORAGE_KEY = 'bike4u_customers_v1';
 // surfaced as a banner in the admin panel so a silently-failed customer/booking save
 // (most commonly the customer photos pushing the payload past Supabase's size limit)
 // doesn't go unnoticed.
-let lastSyncOk = { customers: true };
+let lastSyncOk = { customers: true, bookings: true };
 
 function loadCustomers(){
   try{
@@ -768,13 +768,14 @@ function saveCustomers(){
     console.warn('Could not save customer data:', e);
     alert('Could not save your details. Your browser storage may be full -- this usually happens when the uploaded photos are large. Try using smaller/compressed images.');
   }
-  sbSet('customers', CUSTOMERS).then(ok => {
+  return sbSet('customers', CUSTOMERS).then(ok => {
     lastSyncOk.customers = ok;
     // A failed cloud save here (most often the customer photos pushing the payload over
     // Supabase's size limit) means this signup only exists on this one device/browser --
     // it will never reach the admin's browser. Surface that immediately rather than
     // leaving it to be discovered later as a "missing customer".
     if(!ok && state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
+    return ok;
   });
 }
 
@@ -815,7 +816,11 @@ function saveBookings(){
     console.warn('Could not save booking data:', e);
     alert('Could not save your booking agreement. Your browser storage may be full.');
   }
-  sbSet('bookings', BOOKINGS);
+  return sbSet('bookings', BOOKINGS).then(ok => {
+    lastSyncOk.bookings = ok;
+    if(!ok && state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
+    return ok;
+  });
 }
 
 function deleteBooking(id){
@@ -1911,7 +1916,14 @@ function confirmBookingAndSend(paymentExtra){
     booking.razorpayPaymentId = paymentExtra.razorpayPaymentId;
   }
   BOOKINGS.push(booking);
-  saveBookings();
+  saveBookings().then(ok => {
+    if(ok) return;
+    saveBookings().then(ok2 => {
+      if(!ok2){
+        alert("We couldn't confirm your booking reached our server (this can happen on a weak connection). Your WhatsApp confirmation still went out, but please check with us directly if you don't hear back shortly.");
+      }
+    });
+  });
   notifyIfNewBooking(booking);
 
   bookOnWhatsapp(booking);
@@ -2262,7 +2274,18 @@ function submitCustomerSignup(){
     verificationStatus: 'pending',
   };
   CUSTOMERS.push(customer);
-  saveCustomers();
+  saveCustomers().then(ok => {
+    if(ok) return;
+    // Most failures here are a transient network hiccup rather than a permanent problem,
+    // so it's worth one silent retry before bothering the customer with anything. Only if
+    // that also fails do we actually interrupt them -- and even then, they're not blocked
+    // from continuing, just told plainly what to do about it.
+    saveCustomers().then(ok2 => {
+      if(!ok2){
+        alert("We couldn't confirm your profile reached our server (this can happen on a weak connection). You can still continue -- but please open \"My Profile\" afterwards and tap \"Resync my details\" once you're back on a stronger connection, just to be safe.");
+      }
+    });
+  });
   notifyIfNewCustomer(customer);
   state.currentCustomer = customer;
   try{ localStorage.setItem(CUSTOMER_SESSION_KEY, customer.email); }catch(e){}
@@ -2330,6 +2353,28 @@ function customerLogout(){
   state.currentCustomer = null;
   try{ localStorage.removeItem(CUSTOMER_SESSION_KEY); }catch(e){}
   goTo('home');
+}
+
+// Gives a customer a manual way to re-push their own complete profile -- photos, address,
+// emergency contact, all of it -- to the shared cloud database. This is the real fix for a
+// profile that went missing on the admin's side before the sync merge fix existed: this
+// device's own copy is (almost always) still fully intact locally, it just never made it
+// up successfully, so there's no need to reconstruct anything -- just send the real thing
+// again. Also re-adds the record to this device's own CUSTOMERS list first in case it had
+// fallen out of it from the same historical bug, since state.currentCustomer staying set
+// doesn't guarantee it's still inside the array that actually gets saved.
+async function resyncMyProfile(btn){
+  if(!state.currentCustomer) return;
+  const c = state.currentCustomer;
+  if(!CUSTOMERS.some(x => x.id === c.id)) CUSTOMERS.push(c);
+  try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
+  if(btn){ btn.disabled = true; btn.textContent = 'Syncing…'; }
+  const ok = await sbSet('customers', CUSTOMERS);
+  if(btn){ btn.disabled = false; btn.textContent = '🔄 Resync my details'; }
+  lastSyncOk.customers = ok;
+  alert(ok
+    ? 'Your full profile -- including your photos -- has been re-synced successfully.'
+    : "Couldn't sync right now. Please check your connection and try again in a moment.");
 }
 
 // Forgot-password flow: since this app has no email server, identity is verified with the
@@ -2432,6 +2477,7 @@ function renderCustomerAccount(){
           <h1>My profile</h1>
           <div class="sub">${c.email}</div>
         </div>
+        <button class="btn-ghost" onclick="resyncMyProfile(this)" title="Push your full profile (photos included) to the shared database again">🔄 Resync my details</button>
         <button class="btn-ghost" onclick="customerLogout()">Log out</button>
       </div>
 
@@ -2997,7 +3043,7 @@ function renderCustomersAdminHtml(){
     </div>` : ''}
     ${orphanedBookings().length ? `
     <div class="err" style="display:block;margin-bottom:14px;">
-      ⚠ ${orphanedBookings().length} booking${orphanedBookings().length===1?'':'s'} ${orphanedBookings().length===1?'has':'have'} no matching customer profile here — that's the same sync issue: the booking saved but the customer's profile didn't reach this device/the cloud. Go to <strong>Bookings</strong> and open the affected booking(s) to recreate the profile from what's on the booking record.
+      ⚠ ${orphanedBookings().length} booking${orphanedBookings().length===1?'':'s'} ${orphanedBookings().length===1?'has':'have'} no matching customer profile here — that's the same sync issue: the booking saved but the customer's profile didn't reach this device/the cloud. Go to <strong>Bookings</strong> to recover at least name/email/mobile from the booking record — for the <strong>full</strong> profile with photos, ask the customer to log in on their own device and tap "Resync my details" on their account page.
     </div>` : ''}
     <div class="add-card" style="margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:10px;">
@@ -3207,6 +3253,10 @@ function saveNewCustomerManually(){
 
 function renderBookingsAdminHtml(){
   return `
+    ${!lastSyncOk.bookings ? `
+    <div class="err" style="display:block;margin-bottom:14px;">
+      ⚠ The last booking save to the shared cloud database failed. It may only exist on the customer's/admin's own device until this is retried. <button class="btn-ghost" onclick="saveBookings();">Retry now</button>
+    </div>` : ''}
     <div class="add-card" style="margin-bottom:14px;">
       <div class="field" style="margin-bottom:0;">
         <label>Search</label>
@@ -3266,8 +3316,8 @@ function bookingSummaryCardHtml(bk){
       </div>
       ${missingProfile ? `
       <div class="err" style="display:block;margin-top:8px;" onclick="event.stopPropagation()">
-        ⚠ This customer's profile is missing from Customers (likely a failed cloud sync when they signed up). Their name/email/mobile from this booking are still on record.
-        <button class="btn-ghost" style="margin-top:6px;" onclick="recoverCustomerFromBooking('${bk.id}')">Recreate customer profile from this booking</button>
+        ⚠ This customer's profile is missing from Customers (a past sync issue, now fixed for future signups). This button only recovers name/email/mobile -- that's all a booking ever stores. For the <strong>full</strong> profile (address, emergency contact, KYC photos), ask the customer to log in on the same phone they signed up with and tap <strong>"🔄 Resync my details"</strong> on their account page -- their complete original profile is almost certainly still on that device.
+        <button class="btn-ghost" style="margin-top:6px;" onclick="recoverCustomerFromBooking('${bk.id}')">Recreate name/email/mobile only, from this booking</button>
       </div>` : ''}
     </div>
   `;
