@@ -297,6 +297,24 @@ if('serviceWorker' in navigator){
   .badge-live{background:var(--teal-dim);color:#8FE4D5;}
   .badge-rented{background:#3A1717;color:#F3A19C;}
   .badge-overdue{background:#5A1010;color:#FFB3AD;animation:pulse-badge 1.4s ease-in-out infinite;}
+  .dash-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px;}
+  .dash-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;}
+  .dash-card .lbl{font-size:11.5px;color:var(--text-dim);font-weight:600;text-transform:uppercase;letter-spacing:.03em;margin-bottom:6px;}
+  .dash-card .amt{font-size:20px;font-weight:800;color:var(--teal);}
+  .dash-card .sub{font-size:11.5px;color:var(--text-faint);margin-top:3px;}
+  .dash-period{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;}
+  .dash-period button{background:var(--surface-2);border:1px solid var(--border-strong);color:var(--text-dim);padding:7px 14px;border-radius:99px;font-size:12.5px;font-weight:600;}
+  .dash-period button.active{background:linear-gradient(180deg,var(--yellow-light) 0%,var(--yellow) 100%);color:#161616;border-color:var(--yellow);}
+  .dash-chart{display:flex;align-items:flex-end;gap:4px;height:140px;margin-bottom:6px;overflow-x:auto;padding-bottom:2px;}
+  .dash-bar-col{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;min-width:22px;flex:1;height:100%;}
+  .dash-bar{width:100%;max-width:26px;background:linear-gradient(180deg,var(--teal-light) 0%,var(--teal) 100%);border-radius:4px 4px 0 0;min-height:2px;}
+  .dash-bar-label{font-size:9.5px;color:var(--text-faint);margin-top:4px;white-space:nowrap;transform:rotate(0deg);}
+  .dash-vrow{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);}
+  .dash-vrow:last-child{border-bottom:none;}
+  .dash-vrow-name{flex:0 0 120px;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .dash-vrow-bar-wrap{flex:1;background:var(--surface-2);border-radius:6px;height:20px;overflow:hidden;}
+  .dash-vrow-bar{height:100%;background:linear-gradient(90deg,var(--teal) 0%,var(--teal-light) 100%);border-radius:6px;}
+  .dash-vrow-amt{flex:0 0 auto;font-size:13px;font-weight:700;white-space:nowrap;}
   @keyframes pulse-badge{0%,100%{opacity:1;}50%{opacity:.55;}}
   .badge-available{background:#123A28;color:#7EE2B8;}
 
@@ -774,7 +792,7 @@ function saveBookings(){
 function deleteBooking(id){
   const bk = BOOKINGS.find(x => x.id === id);
   if(!bk) return;
-  if(!confirm(`Delete booking ${bk.id} (${bk.vehicleName} -- ${bk.customerName})? This cannot be undone.`)) return;
+  if(!confirm(`Delete booking ${bookingDisplayNumber(bk.id)} (${bk.vehicleName} -- ${bk.customerName})? This cannot be undone.`)) return;
   BOOKINGS = BOOKINGS.filter(x => x.id !== id);
   saveBookings();
   renderAdmin();
@@ -792,6 +810,21 @@ function markBookingReturned(id, returned){
   bk.modifiedAt = new Date().toISOString();
   saveBookings();
   notifiedOverdueIds.delete(id); // so a future re-rental of this vehicle can alert again if it goes overdue
+  renderAdmin();
+}
+
+// A cancelled booking stays on record (unlike Delete, which erases it) but is excluded
+// from the income dashboard and no longer occupies the vehicle's schedule -- e.g. a
+// customer who backed out before pickup. Deleting a booking has the same income effect
+// automatically, since the dashboard always sums whatever is currently in BOOKINGS live.
+function cancelBooking(id, cancelled){
+  const bk = BOOKINGS.find(x => x.id === id);
+  if(!bk) return;
+  if(cancelled && !confirm(`Mark booking ${bookingDisplayNumber(bk.id)} (${bk.vehicleName} -- ${bk.customerName}) as cancelled? It'll stay on record but drop out of the income dashboard and free up the vehicle for these dates.`)) return;
+  bk.cancelled = cancelled;
+  bk.cancelledAt = cancelled ? new Date().toISOString() : null;
+  bk.modifiedAt = new Date().toISOString();
+  saveBookings();
   renderAdmin();
 }
 
@@ -997,6 +1030,9 @@ let state = {
   couponInput: '',
   appliedCoupon: null, // { code, type, value, discount }
   couponMessage: '',
+  dashboardPeriod: 'month',
+  dashboardFrom: '',
+  dashboardTo: '',
 };
 
 const CUSTOMER_SESSION_KEY = 'bike4u_customer_session_v1';
@@ -1034,6 +1070,7 @@ function vehicleActiveBooking(vehicleId){
   for(const bk of BOOKINGS){
     if(bk.vehicleId !== vehicleId) continue;
     if(bk.returnedAt) continue; // admin has manually cleared this booking off the vehicle
+    if(bk.cancelled) continue;
     const start = new Date(bk.pickupDate + 'T' + bk.pickupTime);
     if(start > now) continue; // hasn't been picked up yet
     if(!latestStarted || start > new Date(latestStarted.pickupDate + 'T' + latestStarted.pickupTime)){
@@ -1079,6 +1116,7 @@ function vehicleConflictingBookings(vehicleId, pickupDate, pickupTime, dropDate,
   return BOOKINGS.filter(bk => {
     if(bk.vehicleId !== vehicleId) return false;
     if(bk.returnedAt) return false; // admin has cleared it off the vehicle -- no longer occupies the schedule
+    if(bk.cancelled) return false;
     if(excludeBookingId && bk.id === excludeBookingId) return false;
     const exStart = new Date(bk.pickupDate + 'T' + bk.pickupTime);
     const exEnd = new Date(bk.dropDate + 'T' + bk.dropTime);
@@ -1300,6 +1338,29 @@ function updateOfflineBanner(){
 // in sync first.
 function genId(prefix){
   return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+// The real booking id (from genId above) has to stay collision-proof across devices, so
+// it can't be a plain sequential number -- but nobody wants to read "BKlz3k2p1a2f" on a
+// receipt. This derives a clean, year-scoped display number instead, purely for showing
+// to people: "BK26-01" is the first booking made in 2026, resetting to -01 the moment the
+// first booking of 2027 comes in -- no cron job or stored counter needed, since it's just
+// each booking's position among others made in the same calendar year, computed fresh
+// every time from the booking dates already on record. The year is included specifically
+// so an annual reset can't ever produce two different bookings both labelled "BK01" --
+// that would defeat the point of a human-readable reference number. The real id
+// underneath never changes or resets; only this cosmetic label does. One small tradeoff:
+// if two devices are mid-sync and briefly disagree on the full booking list, the number
+// shown for a given booking could shift by one until they reconcile a moment later.
+function bookingDisplayNumber(id){
+  const bk = BOOKINGS.find(b => b.id === id);
+  if(!bk) return id;
+  const yearOf = b => new Date(b.agreedAt || b.pickupDate || 0).getFullYear();
+  const year = yearOf(bk);
+  const sameYear = BOOKINGS.filter(b => yearOf(b) === year)
+    .sort((a, b) => new Date(a.agreedAt || a.pickupDate || 0) - new Date(b.agreedAt || b.pickupDate || 0));
+  const idx = sameYear.findIndex(b => b.id === id);
+  return 'BK' + String(year).slice(-2) + '-' + String(idx + 1).padStart(2, '0');
 }
 
 // PDF downloads depend on the externally-loaded jsPDF library, which can still be mid-flight
@@ -1851,7 +1912,7 @@ function confirmBookingAndSend(paymentExtra){
 function bookOnWhatsapp(booking){
   const msg = `Hi 24x7 Bike4u! I'd like to confirm my booking.
 
-Agreement ID: ${booking.id}
+Agreement ID: ${bookingDisplayNumber(booking.id)}
 Customer: ${booking.customerName} (${booking.customerEmail})
 Vehicle: ${booking.vehicleName} (${booking.vehicleColour}, ${booking.vehicleRc})
 Pickup: ${fmtDate(booking.pickupDate)}, ${fmtTime(booking.pickupTime)}
@@ -2444,7 +2505,7 @@ function checkOverdueBookings(){
       notifiedOverdueIds.add(rs.booking.id);
       notifyAdmin(
         'Vehicle not returned on time',
-        `${rs.booking.vehicleName} (Booking ${rs.booking.id}, ${rs.booking.customerName}) was due back ${fmtDate(rs.untilDate)} at ${fmtTime(rs.untilTime)}.`,
+        `${rs.booking.vehicleName} (Booking ${bookingDisplayNumber(rs.booking.id)}, ${rs.booking.customerName}) was due back ${fmtDate(rs.untilDate)} at ${fmtTime(rs.untilTime)}.`,
         'admin'
       );
     }
@@ -2573,7 +2634,7 @@ function renderAdmin(){
     <div class="wrap page">
       <div class="admin-bar">
         <div>
-          <h1>${state.adminTab === 'customers' ? 'Customer profiles' : state.adminTab === 'bookings' ? 'Bookings & agreements' : state.adminTab === 'terms' ? 'Rental Terms & Conditions' : state.adminTab === 'payments' ? 'Payment options' : state.adminTab === 'coupons' ? 'Coupons' : 'Fleet management'}</h1>
+          <h1>${state.adminTab === 'customers' ? 'Customer profiles' : state.adminTab === 'bookings' ? 'Bookings & agreements' : state.adminTab === 'terms' ? 'Rental Terms & Conditions' : state.adminTab === 'payments' ? 'Payment options' : state.adminTab === 'coupons' ? 'Coupons' : state.adminTab === 'dashboard' ? 'Income dashboard' : 'Fleet management'}</h1>
           <div class="sub">${state.adminTab === 'customers'
             ? `${CUSTOMERS.length} customer${CUSTOMERS.length === 1 ? '' : 's'} · ${CUSTOMERS.filter(c=>verificationStatusOf(c)!=='verified').length} not yet verified`
             : state.adminTab === 'bookings'
@@ -2584,6 +2645,8 @@ function renderAdmin(){
             ? `Accepted: ${acceptedMethodsLabel()} · Razorpay ${PAYMENT_SETTINGS.razorpayEnabled && PAYMENT_SETTINGS.razorpayKeyId ? 'live' : 'not set up'}`
             : state.adminTab === 'coupons'
             ? `${COUPONS.length} coupon${COUPONS.length === 1 ? '' : 's'} · ${COUPONS.filter(c=>c.active).length} active`
+            : state.adminTab === 'dashboard'
+            ? `Live · updates automatically as bookings are added, cancelled or deleted`
             : `${VEHICLES.length} vehicles · ${VEHICLES.filter(v=>v.hidden).length} hidden · ${VEHICLES.filter(v=>v.soldOut).length} sold out · ${VEHICLES.filter(v=>vehicleRentalStatus(v.id).rented).length} rented out now${VEHICLES.filter(v=>vehicleRentalStatus(v.id).overdue).length ? ` · ${VEHICLES.filter(v=>vehicleRentalStatus(v.id).overdue).length} overdue` : ''}`}</div>
         </div>
         <div style="display:flex;gap:8px;">
@@ -2592,6 +2655,7 @@ function renderAdmin(){
           ${state.adminTab === 'customers' ? `<button class="btn-ghost" onclick="toggleAddCustomerForm()">${newCustomerDraft ? 'Cancel' : '+ Add customer'}</button>` : ''}
           ${state.adminTab === 'bookings' ? `<button class="btn-ghost" onclick="toggleNewBookingForm()">${newBookingDraft ? 'Cancel' : '+ New booking'}</button>` : ''}
           ${state.adminTab === 'coupons' ? `<button class="btn-ghost" onclick="toggleNewCouponForm()">${newCouponDraft ? 'Cancel' : '+ New coupon'}</button>` : ''}
+          ${state.adminTab === 'dashboard' ? `<button class="btn-ghost" onclick="downloadIncomeReportPDF()">⬇ Download PDF</button>` : ''}
           <button class="btn-ghost" onclick="adminLogout()">Log out</button>
         </div>
       </div>
@@ -2603,6 +2667,7 @@ function renderAdmin(){
       </div>` : ''}
 
       <div class="tab-switch">
+        <button class="${state.adminTab === 'dashboard' ? 'active' : ''}" onclick="setAdminTab('dashboard')">Dashboard</button>
         <button class="${state.adminTab === 'vehicles' ? 'active' : ''}" onclick="setAdminTab('vehicles')">Vehicles</button>
         <button class="${state.adminTab === 'customers' ? 'active' : ''}" onclick="setAdminTab('customers')">Customers</button>
         <button class="${state.adminTab === 'bookings' ? 'active' : ''}" onclick="setAdminTab('bookings')">Bookings</button>
@@ -2611,7 +2676,7 @@ function renderAdmin(){
         <button class="${state.adminTab === 'payments' ? 'active' : ''}" onclick="setAdminTab('payments')">Payments</button>
       </div>
 
-      ${state.adminTab === 'customers' ? renderCustomersAdminHtml() : state.adminTab === 'bookings' ? renderBookingsAdminHtml() : state.adminTab === 'terms' ? renderTermsAdminHtml() : state.adminTab === 'payments' ? renderPaymentsAdminHtml() : state.adminTab === 'coupons' ? renderCouponsAdminHtml() : `
+      ${state.adminTab === 'customers' ? renderCustomersAdminHtml() : state.adminTab === 'bookings' ? renderBookingsAdminHtml() : state.adminTab === 'terms' ? renderTermsAdminHtml() : state.adminTab === 'payments' ? renderPaymentsAdminHtml() : state.adminTab === 'coupons' ? renderCouponsAdminHtml() : state.adminTab === 'dashboard' ? renderDashboardAdminHtml() : `
 
       ${newVehicleDraft ? `
         <div class="add-card">
@@ -2722,7 +2787,7 @@ function vehicleSummaryCardHtml(v){
     statusBadge = rs.overdue
       ? `<span class="badge badge-overdue">⚠ Overdue · was due ${fmtDate(rs.untilDate)}, ${fmtTime(rs.untilTime)}</span>`
       : `<span class="badge badge-rented">Rented · back ${fmtDate(rs.untilDate)}, ${fmtTime(rs.untilTime)}</span>`;
-    markBtn = `<button class="btn-ghost" style="padding:3px 8px;font-size:11.5px;background:#123A28;color:#7EE2B8;border-color:#123A28;" onclick="markBookingReturned('${rs.booking.id}', true)" title="Booking ${rs.booking.id} · ${rs.booking.customerName}">✅ Mark returned</button>`;
+    markBtn = `<button class="btn-ghost" style="padding:3px 8px;font-size:11.5px;background:#123A28;color:#7EE2B8;border-color:#123A28;" onclick="markBookingReturned('${rs.booking.id}', true)" title="Booking ${bookingDisplayNumber(rs.booking.id)} · ${rs.booking.customerName}">✅ Mark returned</button>`;
   }
   return `
     <div class="vehicle-summary-card" onclick="toggleVehicleExpand('${v.id}')">
@@ -2759,7 +2824,7 @@ function vehicleCardHtml(v){
                   const badge = rs.overdue
                     ? `<span class="badge badge-overdue">⚠ Overdue · was due ${fmtDate(rs.untilDate)}, ${fmtTime(rs.untilTime)}</span>`
                     : `<span class="badge badge-rented">Rented · back ${fmtDate(rs.untilDate)}, ${fmtTime(rs.untilTime)}</span>`;
-                  return badge + `<button class="btn-ghost" style="padding:3px 8px;font-size:11.5px;background:#123A28;color:#7EE2B8;border-color:#123A28;" onclick="markBookingReturned('${rs.booking.id}', true)" title="Booking ${rs.booking.id} · ${rs.booking.customerName}">✅ Mark returned</button>`;
+                  return badge + `<button class="btn-ghost" style="padding:3px 8px;font-size:11.5px;background:#123A28;color:#7EE2B8;border-color:#123A28;" onclick="markBookingReturned('${rs.booking.id}', true)" title="Booking ${bookingDisplayNumber(rs.booking.id)} · ${rs.booking.customerName}">✅ Mark returned</button>`;
                 })()}
               </div>
               <label class="photo-upload-label">
@@ -3054,7 +3119,8 @@ function bookingsListInnerHtml(){
     (bk.customerName || '').toLowerCase().includes(q) ||
     (bk.customerMobile || '').toLowerCase().includes(q) ||
     (bk.customerEmail || '').toLowerCase().includes(q) ||
-    (bk.id || '').toLowerCase().includes(q)
+    (bk.id || '').toLowerCase().includes(q) ||
+    bookingDisplayNumber(bk.id).toLowerCase().includes(q)
   );
   if(filtered.length === 0){
     return `<div class="empty"><h3>No matching bookings</h3><p>Try a different name, phone number, email or booking ID.</p></div>`;
@@ -3063,14 +3129,16 @@ function bookingsListInnerHtml(){
 }
 
 function bookingSummaryCardHtml(bk){
-  const paid = (bk.rentalTotal || 0) + (bk.pickupCharge || 0) + (bk.dropCharge || 0) + (bk.helmetCharge || 0)
-    + (bk.extensions || []).reduce((s, e) => s + (e.charge || 0), 0);
+  // bk.rentalTotal already nets everything -- base rent, pickup/drop/helmet charges, and
+  // any extension charges are all folded in as they're added (see saveNewBooking and
+  // saveExtension) -- so it's the correct total on its own, not something to add on top of.
+  const paid = bk.rentalTotal || 0;
   const missingProfile = !CUSTOMERS.some(c => c.id === bk.customerId);
   return `
-    <div class="booking-card" onclick="toggleBookingExpand('${bk.id}')">
+    <div class="booking-card" onclick="toggleBookingExpand('${bk.id}')" style="${bk.cancelled ? 'opacity:.6;' : ''}">
       <div class="booking-card-top">
         <div style="flex:1;min-width:0;">
-          <div class="booking-card-title">${bk.vehicleName} <span class="booking-card-id">— ${bk.id}</span></div>
+          <div class="booking-card-title">${bk.vehicleName} <span class="booking-card-id">— ${bookingDisplayNumber(bk.id)}</span>${bk.cancelled ? ' <span class="badge badge-overdue" style="animation:none;">Cancelled</span>' : ''}</div>
           <div class="booking-card-sub">${bk.customerName || 'Unnamed'} · ${bk.customerEmail || '—'} · ${bk.customerMobile || '—'}</div>
         </div>
         <div class="booking-card-amount">${money(paid)}</div>
@@ -3144,7 +3212,7 @@ function bookingCardHtml(bk){
       <button class="ccard-collapse" onclick="toggleBookingExpand('${bk.id}')">‹ Back to booking</button>
       <div class="ccard-top">
         <div style="flex:1;min-width:0;">
-          <div class="ccard-name">${bk.vehicleName} <span style="color:var(--text-dim);font-weight:500;font-size:12.5px;">— ${bk.id}</span></div>
+          <div class="ccard-name">${bk.vehicleName} <span style="color:var(--text-dim);font-weight:500;font-size:12.5px;">— ${bookingDisplayNumber(bk.id)}</span></div>
           <div class="ccard-meta" style="margin-bottom:10px;">
             Customer: ${bk.customerName} (${bk.customerEmail || bk.customerMobile})<br>
             Agreed on: ${fmtDate(bk.agreedAt.slice(0,10))} ${fmtTime(bk.agreedAt.slice(11,16))}${bk.modifiedAt ? ` · Last modified: ${fmtDate(bk.modifiedAt.slice(0,10))} ${fmtTime(bk.modifiedAt.slice(11,16))}` : ''}<br>
@@ -3217,6 +3285,9 @@ function bookingCardHtml(bk){
         ${bk.returnedAt
           ? `<button class="btn-ghost" style="color:#7EE2B8;border-color:#123A28;" onclick="markBookingReturned('${bk.id}', false)">↩ Marked returned ${fmtDate(bk.returnedAt.slice(0,10))} — undo</button>`
           : `<button class="btn-ghost" style="background:#123A28;color:#7EE2B8;border-color:#123A28;" onclick="markBookingReturned('${bk.id}', true)">✅ Mark vehicle as returned</button>`}
+        ${bk.cancelled
+          ? `<button class="btn-ghost" style="color:#F3A19C;border-color:#5A2A26;" onclick="cancelBooking('${bk.id}', false)">↩ Cancelled ${fmtDate((bk.cancelledAt||'').slice(0,10))} — undo</button>`
+          : `<button class="btn-ghost" onclick="cancelBooking('${bk.id}', true)">🚫 Cancel booking</button>`}
         <button class="btn-ghost" style="color:#F3A19C;border-color:#5A2A26;" onclick="deleteBooking('${bk.id}')">🗑 Delete booking</button>
       </div>
       ${extendDraft && extendDraft.bookingId === bk.id ? renderExtendFormHtml(bk) : ''}
@@ -3515,7 +3586,7 @@ function renderExtendFormHtml(bk){
   const dailyRateHint = vehicle ? `Reference: this vehicle's 150 km/day rate is ${money(vehicle.rate[150])}/day.` : '';
   return `
     <div class="add-card" style="margin-top:10px;">
-      <h3>Extend booking ${bk.id}</h3>
+      <h3>Extend booking ${bookingDisplayNumber(bk.id)}</h3>
       <p class="field-hint" style="margin-bottom:10px;">Current drop-off: ${fmtDate(bk.dropDate)}, ${fmtTime(bk.dropTime)}</p>
       <div class="avcard-fields wide" style="margin-bottom:8px;">
         <div class="field">
@@ -3585,7 +3656,7 @@ function saveExtension(){
     customerId: bk.customerId,
     type: 'extension_confirmed',
     title: 'Your rental has been extended',
-    body: `Hi ${bk.customerName}, your rental of the ${bk.vehicleName} (Booking ${bk.id}) has been extended to ${fmtDate(bk.dropDate)} at ${fmtTime(bk.dropTime)}.${d.charge ? ` Extension charge: ${money(d.charge)}.` : ''}`,
+    body: `Hi ${bk.customerName}, your rental of the ${bk.vehicleName} (Booking ${bookingDisplayNumber(bk.id)}) has been extended to ${fmtDate(bk.dropDate)} at ${fmtTime(bk.dropTime)}.${d.charge ? ` Extension charge: ${money(d.charge)}.` : ''}`,
     createdAt: new Date().toISOString(),
     read: false,
   };
@@ -3698,6 +3769,204 @@ function renderCouponsAdminHtml(){
       </div>
     `).join('')}
   `;
+}
+
+/* ============ INCOME DASHBOARD ============
+   Everything here is computed live from BOOKINGS at render time -- there's no separate
+   "income" store to keep in sync, so a deleted booking (removed from BOOKINGS) or a
+   cancelled one (bk.cancelled) simply isn't counted the next time this renders. Income
+   is bk.rentalTotal, which already nets rent + charges + extensions - discounts/coupon;
+   the refundable deposit is intentionally excluded since it isn't revenue. */
+
+function incomeEligibleBookings(){
+  return BOOKINGS.filter(bk => !bk.cancelled);
+}
+
+function dateOnlyStr(d){ return d.toISOString().slice(0,10); }
+
+function dashboardPeriodRange(period, customFrom, customTo){
+  const now = new Date();
+  const today = dateOnlyStr(now);
+  if(period === 'today') return { from: today, to: today };
+  if(period === 'week'){
+    const day = now.getDay();
+    const diffToMon = (day === 0 ? 6 : day - 1);
+    const monday = new Date(now); monday.setDate(now.getDate() - diffToMon);
+    return { from: dateOnlyStr(monday), to: today };
+  }
+  if(period === 'month'){
+    return { from: dateOnlyStr(new Date(now.getFullYear(), now.getMonth(), 1)), to: today };
+  }
+  if(period === 'year'){
+    return { from: dateOnlyStr(new Date(now.getFullYear(), 0, 1)), to: today };
+  }
+  if(period === 'custom'){
+    return { from: customFrom || today, to: customTo || today };
+  }
+  return { from: '2000-01-01', to: '2099-12-31' }; // 'all'
+}
+
+function bookingsInDateRange(from, to){
+  return incomeEligibleBookings().filter(bk => bk.pickupDate >= from && bk.pickupDate <= to);
+}
+
+function vehicleWiseIncome(bookings){
+  const map = {};
+  bookings.forEach(bk => {
+    const key = bk.vehicleId || bk.vehicleName;
+    if(!map[key]) map[key] = { name: bk.vehicleName, income: 0, count: 0 };
+    map[key].income += (bk.rentalTotal || 0);
+    map[key].count += 1;
+  });
+  return Object.values(map).sort((a, b) => b.income - a.income);
+}
+
+// Picks day/month/year buckets adaptively so a wide range (a whole year, "all time")
+// doesn't try to draw hundreds of daily bars.
+function incomeBuckets(bookings, from, to){
+  const toForSpan = to > dateOnlyStr(new Date()) ? dateOnlyStr(new Date()) : to;
+  const spanDays = Math.max(1, Math.round((new Date(toForSpan) - new Date(from)) / 86400000) + 1);
+  const granularity = spanDays > 730 ? 'year' : spanDays > 60 ? 'month' : 'day';
+  const buckets = {};
+  bookings.forEach(bk => {
+    const key = granularity === 'day' ? bk.pickupDate : granularity === 'month' ? bk.pickupDate.slice(0,7) : bk.pickupDate.slice(0,4);
+    buckets[key] = (buckets[key] || 0) + (bk.rentalTotal || 0);
+  });
+  const keys = Object.keys(buckets).sort();
+  const labelFor = k => {
+    if(granularity === 'day') return fmtDate(k).replace(/, \d{4}$/, '');
+    if(granularity === 'month'){ const [y,m] = k.split('-'); return new Date(+y, +m-1, 1).toLocaleDateString('en-IN', {month:'short', year:'2-digit'}); }
+    return k;
+  };
+  return { granularity, data: keys.map(k => ({ key: k, label: labelFor(k), amount: buckets[k] })) };
+}
+
+function setDashboardPeriod(period){
+  state.dashboardPeriod = period;
+  renderAdmin();
+}
+function updateDashboardCustomRange(field, val){
+  state[field] = val;
+  renderAdmin();
+}
+
+function renderDashboardAdminHtml(){
+  const range = dashboardPeriodRange(state.dashboardPeriod, state.dashboardFrom, state.dashboardTo);
+  const bookings = bookingsInDateRange(range.from, range.to);
+  const total = bookings.reduce((s, bk) => s + (bk.rentalTotal || 0), 0);
+  const avg = bookings.length ? total / bookings.length : 0;
+  const buckets = incomeBuckets(bookings, range.from, range.to);
+  const maxBucket = Math.max(1, ...buckets.data.map(b => b.amount));
+  const vIncome = vehicleWiseIncome(bookings);
+  const maxV = Math.max(1, ...vIncome.map(v => v.income));
+  const cancelledCount = BOOKINGS.filter(bk => bk.cancelled).length;
+
+  return `
+    <div class="dash-period">
+      <button class="${state.dashboardPeriod==='today'?'active':''}" onclick="setDashboardPeriod('today')">Today</button>
+      <button class="${state.dashboardPeriod==='week'?'active':''}" onclick="setDashboardPeriod('week')">This Week</button>
+      <button class="${state.dashboardPeriod==='month'?'active':''}" onclick="setDashboardPeriod('month')">This Month</button>
+      <button class="${state.dashboardPeriod==='year'?'active':''}" onclick="setDashboardPeriod('year')">This Year</button>
+      <button class="${state.dashboardPeriod==='all'?'active':''}" onclick="setDashboardPeriod('all')">All Time</button>
+      <button class="${state.dashboardPeriod==='custom'?'active':''}" onclick="setDashboardPeriod('custom')">Custom</button>
+    </div>
+    ${state.dashboardPeriod === 'custom' ? `
+    <div class="field-row" style="margin-bottom:16px;">
+      <div class="field"><label>From</label><input type="date" value="${state.dashboardFrom}" onchange="updateDashboardCustomRange('dashboardFrom', this.value)"></div>
+      <div class="field"><label>To</label><input type="date" value="${state.dashboardTo}" onchange="updateDashboardCustomRange('dashboardTo', this.value)"></div>
+    </div>` : ''}
+
+    <div class="dash-cards">
+      <div class="dash-card"><div class="lbl">Income</div><div class="amt">${money(total)}</div><div class="sub">${fmtDate(range.from)} – ${fmtDate(range.to)}</div></div>
+      <div class="dash-card"><div class="lbl">Bookings</div><div class="amt" style="color:var(--text);">${bookings.length}</div><div class="sub">counted in this period</div></div>
+      <div class="dash-card"><div class="lbl">Avg / booking</div><div class="amt" style="color:var(--text);">${money(avg)}</div></div>
+      <div class="dash-card"><div class="lbl">Cancelled (excluded)</div><div class="amt" style="color:#F3A19C;">${cancelledCount}</div><div class="sub">all-time, not counted above</div></div>
+    </div>
+
+    <div class="card" style="margin-bottom:18px;">
+      <div class="form-section-title" style="margin-bottom:12px;">Income over time (${buckets.granularity === 'day' ? 'daily' : buckets.granularity === 'month' ? 'monthly' : 'yearly'})</div>
+      ${buckets.data.length === 0 ? `<p class="field-hint">No income recorded in this period.</p>` : `
+      <div class="dash-chart">
+        ${buckets.data.map(b => `
+          <div class="dash-bar-col" title="${b.label}: ${money(b.amount)}">
+            <div class="dash-bar" style="height:${Math.max(2, Math.round(b.amount / maxBucket * 100))}%;"></div>
+            <div class="dash-bar-label">${b.label}</div>
+          </div>
+        `).join('')}
+      </div>`}
+    </div>
+
+    <div class="card">
+      <div class="form-section-title" style="margin-bottom:8px;">Vehicle-wise income</div>
+      ${vIncome.length === 0 ? `<p class="field-hint">No income recorded in this period.</p>` : vIncome.map(v => `
+        <div class="dash-vrow">
+          <div class="dash-vrow-name">${v.name}</div>
+          <div class="dash-vrow-bar-wrap"><div class="dash-vrow-bar" style="width:${Math.round(v.income / maxV * 100)}%;"></div></div>
+          <div class="dash-vrow-amt">${money(v.income)} <span style="color:var(--text-faint);font-weight:500;">(${v.count})</span></div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function downloadIncomeReportPDF(){
+  ensureJsPDFThen(function(){
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+    const margin = 40;
+    let y = 50;
+    const TEAL = [49, 182, 164], DARK = [30,34,34];
+
+    const range = dashboardPeriodRange(state.dashboardPeriod, state.dashboardFrom, state.dashboardTo);
+    const bookings = bookingsInDateRange(range.from, range.to);
+    const total = bookings.reduce((s, bk) => s + (bk.rentalTotal || 0), 0);
+    const vIncome = vehicleWiseIncome(bookings);
+    const periodLabel = { today:'Today', week:'This Week', month:'This Month', year:'This Year', all:'All Time', custom:'Custom Range' }[state.dashboardPeriod] || '';
+
+    try{ doc.addImage(LOGO_BASE64, 'PNG', margin, y - 26, 34, 34); }catch(e){}
+    doc.setFont('helvetica','bold'); doc.setFontSize(18); doc.setTextColor(...TEAL);
+    doc.text('24x7 Bike4u', margin + 42, y - 6);
+    doc.setFontSize(12); doc.setTextColor(...DARK);
+    doc.text('Income Report', margin + 42, y + 12);
+    y += 40;
+
+    doc.setFont('helvetica','normal'); doc.setFontSize(10);
+    doc.text(`Period: ${periodLabel} (${fmtDate(range.from)} - ${fmtDate(range.to)})    Generated: ${fmtDate(todayStr())}`, margin, y);
+    y += 24;
+    doc.setDrawColor(245,194,27); doc.setLineWidth(2); doc.line(margin, y, pageW - margin, y); doc.setLineWidth(1);
+    y += 26;
+
+    doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.setTextColor(...TEAL);
+    doc.text(`Total income: ${money(total)}`, margin, y);
+    doc.setTextColor(...DARK); doc.setFontSize(11); doc.setFont('helvetica','normal');
+    doc.text(`${bookings.length} booking${bookings.length===1?'':'s'} counted (cancelled bookings excluded)`, margin, y + 18);
+    y += 44;
+
+    doc.setFont('helvetica','bold'); doc.setFontSize(12); doc.setTextColor(...TEAL);
+    doc.text('Vehicle-wise breakdown', margin, y);
+    y += 8;
+    doc.setDrawColor(200); doc.line(margin, y, pageW - margin, y);
+    y += 18;
+    doc.setFontSize(10.5);
+    vIncome.forEach(v => {
+      if(y > pageH - 60){ doc.addPage(); y = 50; }
+      doc.setFont('helvetica','bold'); doc.setTextColor(...DARK);
+      doc.text(v.name, margin, y);
+      doc.setFont('helvetica','normal'); doc.setTextColor(90);
+      doc.text(`${v.count} booking${v.count===1?'':'s'}`, margin + 220, y);
+      doc.setFont('helvetica','bold'); doc.setTextColor(...TEAL);
+      doc.text(money(v.income), pageW - margin - 70, y);
+      y += 18;
+    });
+    if(vIncome.length === 0){
+      doc.setFont('helvetica','normal'); doc.setTextColor(120);
+      doc.text('No income recorded in this period.', margin, y);
+    }
+
+    doc.save(`Bike4u-Income-${state.dashboardPeriod}-${todayStr()}.pdf`);
+  });
 }
 
 function renderPaymentsAdminHtml(){
@@ -3842,8 +4111,8 @@ function sendCustomerNotification(bookingId, type){
   const isReturn = type === 'return';
   const title = isReturn ? 'Time to return your ride' : 'Need more time with your ride?';
   const body = isReturn
-    ? `Hi ${bk.customerName}, your rental of the ${bk.vehicleName} (Booking ${bk.id}) is due for drop-off on ${fmtDate(bk.dropDate)} at ${fmtTime(bk.dropTime)}. Please return the vehicle on time to avoid late charges.`
-    : `Hi ${bk.customerName}, if you'd like to extend your rental of the ${bk.vehicleName} (Booking ${bk.id}) beyond ${fmtDate(bk.dropDate)}, let us know and we'll help arrange it.`;
+    ? `Hi ${bk.customerName}, your rental of the ${bk.vehicleName} (Booking ${bookingDisplayNumber(bk.id)}) is due for drop-off on ${fmtDate(bk.dropDate)} at ${fmtTime(bk.dropTime)}. Please return the vehicle on time to avoid late charges.`
+    : `Hi ${bk.customerName}, if you'd like to extend your rental of the ${bk.vehicleName} (Booking ${bookingDisplayNumber(bk.id)}) beyond ${fmtDate(bk.dropDate)}, let us know and we'll help arrange it.`;
 
   const notif = {
     id: 'NT' + Date.now() + Math.floor(Math.random() * 1000),
@@ -3883,7 +4152,7 @@ function shareBookingOnWhatsapp(id){
     `*24x7 Bike4U Bike Rentals*`,
     `Booking confirmed! 🎉`,
     ``,
-    `Booking ID: ${bk.id}`,
+    `Booking ID: ${bookingDisplayNumber(bk.id)}`,
     `Vehicle: ${bk.vehicleName} (${bk.vehicleColour})`,
     `Pickup: ${fmtDate(bk.pickupDate)}, ${fmtTime(bk.pickupTime)}`,
     `Drop-off: ${fmtDate(bk.dropDate)}, ${fmtTime(bk.dropTime)}`,
@@ -3941,7 +4210,7 @@ function generateBookingAgreementPDF(id){
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(10);
-  doc.text(`Agreement ID: ${bk.id}    Terms version: ${bk.termsVersion}`, margin, y);
+  doc.text(`Agreement ID: ${bookingDisplayNumber(bk.id)}    Terms version: ${bk.termsVersion}`, margin, y);
   y += 14;
   if(bk.modifiedAt){
     doc.text(`(Booking last modified by admin on ${fmtDate(bk.modifiedAt.slice(0,10))} at ${fmtTime(bk.modifiedAt.slice(11,16))})`, margin, y);
@@ -4030,7 +4299,7 @@ function generateBookingAgreementPDF(id){
   y += 15;
   doc.text(`Geo-tag location at time of booking: ${bk.customerGeo || 'Not recorded'}`, margin, y);
 
-  doc.save(`Bike4u-Agreement-${bk.customerName.replace(/\s+/g,'_')}-${bk.id}.pdf`);
+  doc.save(`Bike4u-Agreement-${bk.customerName.replace(/\s+/g,'_')}-${bookingDisplayNumber(bk.id)}.pdf`);
 }
 
 /* ============ INVOICES ============
@@ -4084,7 +4353,7 @@ function generateInvoicePDF(id, kind, extension){
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(10);
-  doc.text(`Invoice for Booking ${bk.id}   ·   Issued ${fmtDate(todayStr())}`, margin, y);
+  doc.text(`Invoice for Booking ${bookingDisplayNumber(bk.id)}   ·   Issued ${fmtDate(todayStr())}`, margin, y);
   y += 20;
 
   doc.setDrawColor(...YELLOW);
@@ -4143,11 +4412,11 @@ function sendInvoiceOnWhatsapp(id, kind, extension){
     const result = generateInvoicePDF(id, kind, extension);
     if(!result) return;
     const { doc, bk } = result;
-    const filename = `Bike4u-Invoice-${bk.customerName.replace(/\s+/g,'_')}-${bk.id}${kind==='extension' ? '-ext' : ''}.pdf`;
+    const filename = `Bike4u-Invoice-${bk.customerName.replace(/\s+/g,'_')}-${bookingDisplayNumber(bk.id)}${kind==='extension' ? '-ext' : ''}.pdf`;
     const waNum = (bk.customerMobile || '').replace(/\D/g, '');
     const caption = kind === 'extension'
-      ? `*24x7 Bike4U Bike Rentals*\nHere's your updated invoice after the extension on Booking ${bk.id}.\nNew total: ${money(bk.rentalTotal)}`
-      : `*24x7 Bike4U Bike Rentals*\nHere's your invoice for Booking ${bk.id}.\nTotal: ${money(bk.rentalTotal)}`;
+      ? `*24x7 Bike4U Bike Rentals*\nHere's your updated invoice after the extension on Booking ${bookingDisplayNumber(bk.id)}.\nNew total: ${money(bk.rentalTotal)}`
+      : `*24x7 Bike4U Bike Rentals*\nHere's your invoice for Booking ${bookingDisplayNumber(bk.id)}.\nTotal: ${money(bk.rentalTotal)}`;
 
     let shared = false;
     try{
