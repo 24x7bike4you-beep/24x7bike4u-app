@@ -2077,16 +2077,101 @@ function renderCustomerSignup(){
   `;
 }
 
+// Resizes and re-compresses an uploaded image before it's ever stored, instead of keeping
+// a raw phone-camera photo (often several MB) as-is. This is what was silently failing
+// customer signups: every signup re-saves the *entire* customer list, photos included, as
+// one block, both to this browser's local storage and to the shared cloud database -- so
+// as photos piled up uncompressed, that block eventually exceeded local storage's limit
+// (the alert seen in the screenshot) and/or the cloud database's request size limit (the
+// separate "cloud save failed" banner). Downscaling to at most maxDim on the longer side
+// and re-encoding as JPEG typically cuts a multi-MB photo down to a couple hundred KB --
+// still clearly legible for KYC documents -- without changing anything else about the flow.
+function compressImageFile(file, maxDim, quality, callback){
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      let width = img.width, height = img.height;
+      if(width > maxDim || height > maxDim){
+        if(width > height){ height = Math.round(height * maxDim / width); width = maxDim; }
+        else { width = Math.round(width * maxDim / height); height = maxDim; }
+      }
+      try{
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        callback(canvas.toDataURL('image/jpeg', quality));
+      }catch(err){
+        callback(e.target.result); // canvas export failed for some reason -- fall back to the original rather than losing the upload
+      }
+    };
+    img.onerror = () => callback(e.target.result);
+    img.src = e.target.result;
+  };
+  reader.onerror = () => callback(null);
+  reader.readAsDataURL(file);
+}
+
+// Same idea as compressImageFile above, but for a photo that's already stored as a data
+// URL rather than a fresh upload -- used to retroactively shrink older customers' photos
+// that were saved before compression existed, which may still be taking up local storage
+// and cloud payload space today even though new uploads are now compressed automatically.
+function compressDataUrl(dataUrl, maxDim, quality, callback){
+  if(!dataUrl){ callback(dataUrl); return; }
+  const img = new Image();
+  img.onload = () => {
+    let width = img.width, height = img.height;
+    if(width > maxDim || height > maxDim){
+      if(width > height){ height = Math.round(height * maxDim / width); width = maxDim; }
+      else { width = Math.round(width * maxDim / height); height = maxDim; }
+    }
+    try{
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+      callback(canvas.toDataURL('image/jpeg', quality));
+    }catch(err){ callback(dataUrl); }
+  };
+  img.onerror = () => callback(dataUrl);
+  img.src = dataUrl;
+}
+
+function compressAllStoredCustomerPhotos(btn){
+  if(btn){ btn.disabled = true; btn.textContent = 'Compressing…'; }
+  const fields = ['selfie','aadharFront','aadharBack','licenseFront','licenseBack'];
+  const jobs = [];
+  CUSTOMERS.forEach(c => {
+    fields.forEach(f => {
+      if(c[f] && c[f].length > 200000) jobs.push({ c, f }); // only bother with photos that are actually large already
+    });
+  });
+  if(jobs.length === 0){
+    if(btn){ btn.disabled = false; btn.textContent = '🗜 Compress stored photos'; }
+    alert('Nothing to compress -- no unusually large stored photos found.');
+    return;
+  }
+  let remaining = jobs.length;
+  jobs.forEach(job => {
+    compressDataUrl(job.c[job.f], 1280, 0.72, result => {
+      job.c[job.f] = result;
+      remaining--;
+      if(remaining === 0){
+        saveCustomers();
+        renderAdmin();
+      }
+    });
+  });
+}
+
 function customerDraftUpload(key, input){
   const file = input.files[0];
   if(!file) return;
-  const reader = new FileReader();
-  reader.onload = e => {
-    customerDraft[key] = e.target.result;
+  compressImageFile(file, 1280, 0.72, dataUrl => {
+    if(!dataUrl) return;
+    customerDraft[key] = dataUrl;
     saveCustomerDraft();
     renderCustomerSignup();
-  };
-  reader.readAsDataURL(file);
+  });
 }
 
 function submitCustomerSignup(){
@@ -2892,6 +2977,7 @@ function renderCustomersAdminHtml(){
           <input type="text" id="customer-search-input" placeholder="Search by name, phone or email…" value="${state.customerSearch || ''}" oninput="onCustomerSearchInput(this.value)">
         </div>
         <button class="btn-ghost" onclick="refreshCustomersFromCloud(this)">🔄 Refresh</button>
+        <button class="btn-ghost" onclick="compressAllStoredCustomerPhotos(this)">🗜 Compress photos</button>
       </div>
     </div>
     ${newCustomerDraft ? renderNewCustomerFormHtml() : ''}
@@ -4490,15 +4576,14 @@ function updateCustomerField(id, field, val){
 function adminReplaceCustomerDoc(id, key, input){
   const file = input.files[0];
   if(!file) return;
-  const reader = new FileReader();
-  reader.onload = e => {
+  compressImageFile(file, 1280, 0.72, dataUrl => {
+    if(!dataUrl) return;
     const c = CUSTOMERS.find(x => x.id === id);
     if(!c) return;
-    c[key] = e.target.result;
+    c[key] = dataUrl;
     saveCustomers();
     renderAdmin();
-  };
-  reader.readAsDataURL(file);
+  });
 }
 
 /* ============ DOCUMENT EDITOR (crop / rotate / straighten) ============
@@ -4868,14 +4953,13 @@ function toggleSoldOut(id){
 function uploadPhoto(id, input){
   const file = input.files[0];
   if(!file) return;
-  const reader = new FileReader();
-  reader.onload = e => {
+  compressImageFile(file, 1000, 0.78, dataUrl => {
+    if(!dataUrl) return;
     const v = VEHICLES.find(x => x.id === id);
-    v.photo = e.target.result;
+    v.photo = dataUrl;
     saveVehicles();
     renderAdmin();
-  };
-  reader.readAsDataURL(file);
+  });
 }
 
 /* ============ ADMIN: ADD VEHICLE ============ */
@@ -4896,12 +4980,11 @@ function setDraftType(t){
 function draftPhotoUpload(input){
   const file = input.files[0];
   if(!file) return;
-  const reader = new FileReader();
-  reader.onload = e => {
-    newVehicleDraft.photo = e.target.result;
+  compressImageFile(file, 1000, 0.78, dataUrl => {
+    if(!dataUrl) return;
+    newVehicleDraft.photo = dataUrl;
     renderAdmin();
-  };
-  reader.readAsDataURL(file);
+  });
 }
 function submitNewVehicle(){
   const d = newVehicleDraft;
