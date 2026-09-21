@@ -3,6 +3,18 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>
+// Sets the theme before any CSS paints, so there's no flash of the wrong theme on load --
+// this has to run this early (blocking, before the stylesheet) rather than in the main
+// script at the bottom of the page, which only runs after the browser has already painted.
+(function(){
+  try{
+    var saved = localStorage.getItem('bike4u_theme_v1');
+    var theme = saved || (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    document.documentElement.dataset.theme = theme;
+  }catch(e){}
+})();
+</script>
 <title>Bike & Scooter Rental in Indore, Open 24x7 | 24x7 Bike4u</title>
 <meta name="description" content="Rent bikes & scooters in Indore anytime, day or night. Activa, Jupiter, Pulsar, Royal Enfield & more — hourly, daily, weekly plans, easy online KYC, doorstep-ready fleet. RENT IT, LIKE YOU OWN IT!">
 <meta name="keywords" content="bike rental Indore, scooter rental Indore, two wheeler rental Indore, self drive bike rental Indore, Activa on rent Indore, bike rent near me, 24x7 bike rental">
@@ -123,6 +135,7 @@ if('serviceWorker' in navigator){
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;900&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root{
+    color-scheme: dark;
     --bg:#14191B;
     --surface:#1D2426;
     --surface-2:#252E30;
@@ -145,6 +158,23 @@ if('serviceWorker' in navigator){
     --text-dim:#9BA1A0;
     --text-faint:#666D6C;
     --radius:14px;
+    --glow:#26302F;
+    --header-bg:rgba(20,25,27,0.94);
+  }
+  :root[data-theme="light"]{
+    color-scheme: light;
+    --bg:#F5F3EE;
+    --surface:#FFFFFF;
+    --surface-2:#EFEBE1;
+    --surface-light:#FFFFFF;
+    --border:#E2DED2;
+    --border-strong:#CDC7B6;
+    --teal-dim:#D8F3EE;
+    --text:#211F1A;
+    --text-dim:#6C665A;
+    --text-faint:#9B9484;
+    --glow:#FFFFFF;
+    --header-bg:rgba(245,243,238,0.92);
   }
   @keyframes fadeInUp{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:translateY(0);}}
   @keyframes popIn{from{opacity:0;transform:scale(.94);}to{opacity:1;transform:scale(1);}}
@@ -152,13 +182,16 @@ if('serviceWorker' in navigator){
   .vcard,.avcard,.ccard,.card,.ticket,.add-card,.profile-card,.booking-card,.vehicle-summary-card{animation:popIn .28s cubic-bezier(.2,.8,.3,1) both;}
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;}
-  body{background:radial-gradient(ellipse 900px 500px at 50% -10%,#26302F 0%,var(--bg) 55%) fixed,var(--bg);color:var(--text);font-family:'Inter',sans-serif;-webkit-font-smoothing:antialiased;min-height:100vh;}
+  body{background:radial-gradient(ellipse 900px 500px at 50% -10%,var(--glow) 0%,var(--bg) 55%) fixed,var(--bg);color:var(--text);font-family:'Inter',sans-serif;-webkit-font-smoothing:antialiased;min-height:100vh;transition:background-color .25s ease,color .25s ease;}
   h1,h2,h3,.display{font-family:'Archivo',sans-serif;font-weight:900;letter-spacing:-0.01em;margin:0;}
   .wrap{max-width:640px;margin:0 auto;padding:0 20px;}
   button{font-family:inherit;cursor:pointer;}
+  .theme-toggle{display:flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:50%;background:linear-gradient(180deg,var(--surface-light) 0%,var(--surface-2) 100%);border:1px solid var(--border-strong);font-size:16px;box-shadow:0 3px 0 rgba(0,0,0,.25),0 5px 8px rgba(0,0,0,.18);transition:transform .12s ease,box-shadow .12s ease;flex-shrink:0;}
+  .theme-toggle:hover{transform:translateY(-1px);}
+  .theme-toggle:active{transform:translateY(2px);box-shadow:0 1px 0 rgba(0,0,0,.25),0 1px 3px rgba(0,0,0,.15);}
 
   /* ---------- Header ---------- */
-  header{border-bottom:1px solid var(--border);padding:20px 0;position:sticky;top:0;background:rgba(20,25,27,0.94);backdrop-filter:blur(8px);z-index:50;}
+  header{border-bottom:1px solid var(--border);padding:20px 0;position:sticky;top:0;background:var(--header-bg);backdrop-filter:blur(8px);z-index:50;transition:background-color .25s ease;}
   .header-inner{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:nowrap;max-width:640px;margin:0 auto;padding:0 20px;}
   .header-inner > div:last-child{display:flex;align-items:center;gap:12px;flex-shrink:0;}
   @media (max-width:480px){
@@ -456,6 +489,7 @@ if('serviceWorker' in navigator){
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:12px;">
+      <button id="theme-toggle-btn" class="theme-toggle" onclick="toggleTheme()" title="Switch light/dark theme">🌙</button>
       <a href="tel:+918982008803" title="Call us" style="display:flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:50%;background:var(--surface-2);border:1px solid var(--border-strong);text-decoration:none;font-size:17px;">📞</a>
       <a href="https://wa.me/918982008803" target="_blank" rel="noopener" title="WhatsApp us" style="display:flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:50%;background:var(--whatsapp);text-decoration:none;">
         <svg width="19" height="19" viewBox="0 0 24 24" fill="#06210F"><path d="M12 2C6.48 2 2 6.48 2 12c0 1.85.5 3.58 1.36 5.07L2 22l5.06-1.33A9.94 9.94 0 0012 22c5.52 0 10-4.48 10-10S17.52 2 12 2zm0 18a7.9 7.9 0 01-4.24-1.22l-.3-.18-3.05.8.82-2.98-.2-.31A7.93 7.93 0 014 12c0-4.41 3.59-8 8-8s8 3.59 8 8-3.59 8-8 8z"/><path d="M16.6 13.7c-.25-.12-1.47-.72-1.7-.8-.23-.08-.39-.12-.56.12-.16.25-.64.8-.78.96-.14.16-.29.18-.53.06-.25-.12-1.05-.39-2-1.23-.74-.66-1.24-1.47-1.39-1.72-.14-.25-.02-.38.11-.5.11-.11.25-.29.37-.43.12-.14.16-.25.25-.41.08-.16.04-.31-.02-.43-.06-.12-.56-1.35-.77-1.85-.2-.48-.41-.42-.56-.43h-.48c-.16 0-.43.06-.66.31-.23.25-.86.84-.86 2.04 0 1.2.88 2.36 1 2.53.12.16 1.74 2.66 4.22 3.73.59.25 1.05.4 1.41.51.59.19 1.13.16 1.55.1.47-.07 1.47-.6 1.68-1.18.21-.58.21-1.08.14-1.18-.06-.1-.23-.16-.48-.28z"/></svg>
@@ -1421,6 +1455,28 @@ function updateOfflineBanner(){
   if(el) el.style.display = navigator.onLine ? 'none' : 'block';
 }
 
+// Light/dark theme -- defaults to the device's own light/dark setting on first visit, then
+// remembers whatever the person picks from then on. Swapping [data-theme] flips every
+// var()-based colour across the whole app at once (surfaces, borders, text); the small set
+// of self-contained coloured badges/chips elsewhere keep their own fixed colours by design,
+// same as e.g. Gmail labels, since those read fine on either a light or dark page.
+const THEME_KEY = 'bike4u_theme_v1';
+function applySavedTheme(){
+  let saved = null;
+  try{ saved = localStorage.getItem(THEME_KEY); }catch(e){}
+  const theme = saved || (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+  document.documentElement.dataset.theme = theme;
+  const btn = document.getElementById('theme-toggle-btn');
+  if(btn) btn.textContent = theme === 'light' ? '☀️' : '🌙';
+}
+function toggleTheme(){
+  const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = next;
+  try{ localStorage.setItem(THEME_KEY, next); }catch(e){}
+  const btn = document.getElementById('theme-toggle-btn');
+  if(btn) btn.textContent = next === 'light' ? '☀️' : '🌙';
+}
+
 // Booking/customer IDs used to be "one more than the highest ID this device currently
 // knows about" -- fine on a single device, but this app syncs across many phones/laptops
 // via Supabase, and a device that hasn't pulled the latest data yet (sync happens in the
@@ -2179,26 +2235,94 @@ function renderCustomerSignup(){
 // separate "cloud save failed" banner). Downscaling to at most maxDim on the longer side
 // and re-encoding as JPEG typically cuts a multi-MB photo down to a couple hundred KB --
 // still clearly legible for KYC documents -- without changing anything else about the flow.
+// Resizes and re-compresses an uploaded image before it's ever stored, instead of keeping
+// a raw phone-camera photo (often several MB) as-is. This is what was silently failing
+// customer signups: every signup re-saves the *entire* customer list, photos included, as
+// one block, both to this browser's local storage and to the shared cloud database -- so
+// as photos piled up uncompressed, that block eventually exceeded local storage's limit
+// (the alert seen in the screenshot) and/or the cloud database's request size limit (the
+// separate "cloud save failed" banner). Downscaling to at most maxDim on the longer side
+// and re-encoding as JPEG typically cuts a multi-MB photo down to a couple hundred KB --
+// still clearly legible for KYC documents -- without changing anything else about the flow.
+//
+// HEIC (the default photo format on iPhones) is a special case: browsers can't decode it
+// in an <img> tag via canvas at all, so the resize logic below can't even run on it
+// directly. Rather than asking the customer to change a setting and retake the photo, this
+// converts HEIC to JPEG automatically first (via a small library loaded only when actually
+// needed -- never for the common JPEG/PNG case) and then runs it through the exact same
+// resize/compress path as everything else, so both Android and iPhone customers get a
+// fully hands-off upload with no visible difference in what they have to do.
+let heic2anyLoadState = 'idle';
+function ensureHeic2AnyThen(callback){
+  if(window.heic2any){ callback(); return; }
+  if(heic2anyLoadState === 'failed'){ callback(); return; } // don't keep retrying a CDN that already failed this session
+  if(heic2anyLoadState === 'loading'){ setTimeout(() => ensureHeic2AnyThen(callback), 200); return; }
+  heic2anyLoadState = 'loading';
+  const script = document.createElement('script');
+  script.src = 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js';
+  script.onload = () => { heic2anyLoadState = 'ready'; callback(); };
+  script.onerror = () => { heic2anyLoadState = 'failed'; callback(); }; // caller checks window.heic2any and falls back gracefully
+  document.head.appendChild(script);
+}
+
 function compressImageFile(file, maxDim, quality, callback){
+  const MAX_RAW_BYTES = 12 * 1024 * 1024;
+  if(file.size > MAX_RAW_BYTES){
+    alert(`That photo is quite large (${Math.round(file.size/1024/1024)}MB). Please choose a smaller photo, or pick an existing JPEG/PNG photo instead.`);
+    callback(null);
+    return;
+  }
+
+  function resizeAndEncode(img, fallbackDataUrl){
+    let width = img.width, height = img.height;
+    if(width > maxDim || height > maxDim){
+      if(width > height){ height = Math.round(height * maxDim / width); width = maxDim; }
+      else { width = Math.round(width * maxDim / height); height = maxDim; }
+    }
+    try{
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+      callback(canvas.toDataURL('image/jpeg', quality));
+    }catch(err){
+      callback(fallbackDataUrl); // canvas export itself failed for some reason -- the image DID decode, so the original is a reasonably-sized real photo, safe to fall back to
+    }
+  }
+
+  function giveUp(rawDataUrl){
+    if(file.size <= 1.5 * 1024 * 1024){
+      // Small enough to be safe even unconverted -- store as-is as a last resort rather
+      // than blocking the signup outright.
+      callback(rawDataUrl);
+    } else {
+      alert("This photo's format couldn't be processed automatically. Please choose an existing JPEG/PNG photo from your gallery instead, or retake it after switching iPhone Settings > Camera > Formats to \"Most Compatible\".");
+      callback(null);
+    }
+  }
+
   const reader = new FileReader();
   reader.onload = e => {
     const img = new Image();
-    img.onload = () => {
-      let width = img.width, height = img.height;
-      if(width > maxDim || height > maxDim){
-        if(width > height){ height = Math.round(height * maxDim / width); width = maxDim; }
-        else { width = Math.round(width * maxDim / height); height = maxDim; }
-      }
-      try{
-        const canvas = document.createElement('canvas');
-        canvas.width = width; canvas.height = height;
-        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
-        callback(canvas.toDataURL('image/jpeg', quality));
-      }catch(err){
-        callback(e.target.result); // canvas export failed for some reason -- fall back to the original rather than losing the upload
-      }
+    img.onload = () => resizeAndEncode(img, e.target.result);
+    img.onerror = () => {
+      // Native decode failed -- almost always HEIC. Try converting it automatically
+      // before falling back to anything else.
+      ensureHeic2AnyThen(() => {
+        if(!window.heic2any){ giveUp(e.target.result); return; }
+        window.heic2any({ blob: file, toType: 'image/jpeg', quality: 0.85 }).then(converted => {
+          const blob = Array.isArray(converted) ? converted[0] : converted;
+          const r2 = new FileReader();
+          r2.onload = e2 => {
+            const img2 = new Image();
+            img2.onload = () => resizeAndEncode(img2, e2.target.result);
+            img2.onerror = () => giveUp(e.target.result);
+            img2.src = e2.target.result;
+          };
+          r2.onerror = () => giveUp(e.target.result);
+          r2.readAsDataURL(blob);
+        }).catch(() => giveUp(e.target.result));
+      });
     };
-    img.onerror = () => callback(e.target.result);
     img.src = e.target.result;
   };
   reader.onerror = () => callback(null);
@@ -2410,12 +2534,29 @@ async function resyncMyProfile(btn){
   if(!CUSTOMERS.some(x => x.id === c.id)) CUSTOMERS.push(c);
   try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
   if(btn){ btn.disabled = true; btn.textContent = 'Syncing…'; }
+
+  // A failure here is far more often "the photos are too large for one request" than an
+  // actual connectivity problem -- Supabase's error text for that doesn't always say so in
+  // plain words, so this checks the size directly rather than trusting a generic error
+  // message, and tailors what's shown accordingly instead of always blaming "the internet".
+  let payloadMB = 0;
+  try{ payloadMB = new Blob([JSON.stringify(CUSTOMERS)]).size / 1024 / 1024; }catch(e){}
+
+  setPendingSync('customers', true);
   const ok = await sbSet('customers', CUSTOMERS);
   if(btn){ btn.disabled = false; btn.textContent = '🔄 Resync my details'; }
   lastSyncOk.customers = ok;
-  alert(ok
-    ? 'Your full profile -- including your photos -- has been re-synced successfully.'
-    : "Couldn't sync right now. Please check your connection and try again in a moment.");
+  if(ok){
+    setPendingSync('customers', false);
+    alert('Your full profile -- including your photos -- has been re-synced successfully.');
+  } else {
+    scheduleBackgroundRetry('customers', () => CUSTOMERS, 0); // keeps trying quietly even if this manual attempt didn't land
+    if(payloadMB > 4){
+      alert(`Couldn't sync -- the combined photos on file are quite large (about ${payloadMB.toFixed(1)}MB across everyone's profiles), which is most likely why this is failing rather than your connection. This should self-resolve automatically once the business runs "Compress stored photos" from their side -- it will keep retrying quietly in the background either way, so you don't need to do anything further.`);
+    } else {
+      alert("Couldn't sync right now. Please check your connection -- it will also keep retrying automatically in the background, so you don't need to keep tapping this.");
+    }
+  }
 }
 
 // Forgot-password flow: since this app has no email server, identity is verified with the
@@ -4915,9 +5056,23 @@ function docEditorReset(customerId, fieldKey){
   openDocEditor(customerId, fieldKey);
 }
 
+// Whatever comes out of the crop/rotate/straighten editor gets the same size cap as a
+// fresh upload -- the editor loads the currently-stored image at its full original
+// resolution to edit it (openDocEditor above), so without this, saving here would
+// re-export at that same original size every time, undoing compression on any photo that
+// predates the fix (or slipped through some other way) the moment it's edited.
 function docEditorSave(){
   const final = docEditor.angle !== 0 ? rotatedCanvas(docEditor.baseCanvas, docEditor.angle) : docEditor.baseCanvas;
-  const dataUrl = final.toDataURL('image/jpeg', 0.88);
+  const maxDim = 1280;
+  let outCanvas = final;
+  if(final.width > maxDim || final.height > maxDim){
+    let w = final.width, h = final.height;
+    if(w > h){ h = Math.round(h * maxDim / w); w = maxDim; } else { w = Math.round(w * maxDim / h); h = maxDim; }
+    outCanvas = document.createElement('canvas');
+    outCanvas.width = w; outCanvas.height = h;
+    outCanvas.getContext('2d').drawImage(final, 0, 0, w, h);
+  }
+  const dataUrl = outCanvas.toDataURL('image/jpeg', 0.78);
   const c = CUSTOMERS.find(x => x.id === docEditor.customerId);
   if(c){
     c[docEditor.fieldKey] = dataUrl;
@@ -5295,6 +5450,7 @@ function restartTour(){
   render();
   syncFromSupabase();
   resumePendingSyncs(); // picks up any signup/booking that failed to reach the cloud in a previous session on this device, and quietly finishes the job
+  applySavedTheme();
   maybeStartHomeTour();
 
   // Keep the "Rented until.../Available now" badges (admin Fleet tab and the customer
