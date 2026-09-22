@@ -607,6 +607,61 @@ function withTimeout(promise, ms, fallback){
   ]);
 }
 
+/* ============ SUPABASE STORAGE (photo files, not embedded in the JSON blob) ============
+   This is the actual, durable fix for "large uploads eventually break saving" -- every
+   compression tweak before this still left photos embedded as base64 text inside the one
+   customers JSON blob, and that blob gets rewritten in full on every single signup. So even
+   with every photo well-compressed, the *combined* size of everyone's photos still grows
+   without bound as the customer base grows, and eventually any save starts failing again --
+   not because of one photo, but the accumulated total. Uploading each photo to Supabase's
+   file storage instead, and keeping only its short URL in the customer record, decouples
+   the two entirely: the JSON blob only ever holds a few dozen bytes per photo regardless of
+   how many customers there are or how large their original photos were.
+   Requires a public Storage bucket named 'customer-photos' to exist in the Supabase
+   project (Storage -> New bucket -> name it exactly this -> Public bucket). Until that
+   bucket exists, every upload attempt below fails harmlessly and the app automatically
+   keeps using the compressed data URL directly, exactly as it already does today -- so
+   this is safe to ship immediately and simply starts working the moment the bucket exists,
+   with nothing else to change on the code side. */
+const STORAGE_BUCKET = 'customer-photos';
+function dataUrlToBlob(dataUrl){
+  const parts = dataUrl.split(',');
+  const mimeMatch = parts[0].match(/:(.*?);/);
+  const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+  const bin = atob(parts[1]);
+  const arr = new Uint8Array(bin.length);
+  for(let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type: mime });
+}
+async function uploadToStorage(path, blob){
+  const client = await getSupabase();
+  if(!client || !client.storage) return null;
+  try{
+    const result = await withTimeout(
+      client.storage.from(STORAGE_BUCKET).upload(path, blob, { upsert: true, contentType: blob.type || 'image/jpeg' }),
+      15000,
+      { error: 'timeout' }
+    );
+    if(result.error){ console.warn('Bike4u: storage upload failed for', path, '--', (result.error && result.error.message) || result.error); return null; }
+    const pub = client.storage.from(STORAGE_BUCKET).getPublicUrl(path);
+    return (pub && pub.data && pub.data.publicUrl) || null;
+  }catch(e){ console.warn('Bike4u: storage upload error for', path, e); return null; }
+}
+// Swaps every embedded data-URL photo on a customer record for a lightweight storage URL,
+// in place. Fields that fail to upload (bucket missing, offline, etc.) are simply left as
+// their already-compressed data URL -- nothing blocks or breaks either way.
+async function uploadCustomerPhotosToStorage(customer){
+  const fields = ['selfie', 'aadharFront', 'aadharBack', 'licenseFront', 'licenseBack'];
+  await Promise.all(fields.map(async f => {
+    const val = customer[f];
+    if(!val || typeof val !== 'string' || !val.startsWith('data:')) return;
+    let blob;
+    try{ blob = dataUrlToBlob(val); }catch(e){ return; }
+    const url = await uploadToStorage(`${customer.id}/${f}-${Date.now()}.jpg`, blob);
+    if(url) customer[f] = url;
+  }));
+}
+
 async function sbGet(key){
   const client = await getSupabase();
   if(!client) return null;
@@ -2215,7 +2270,7 @@ function renderCustomerSignup(){
           </div>
         </div>
 
-        <button class="btn-primary" onclick="submitCustomerSignup()">Submit &amp; create profile</button>
+        <button class="btn-primary" id="signup-submit-btn" onclick="submitCustomerSignup()">Submit &amp; create profile</button>
         <div class="err" id="signup-err" style="display:none;"></div>
 
         <div class="auth-switch">
@@ -2359,7 +2414,7 @@ function compressAllStoredCustomerPhotos(btn){
   const jobs = [];
   CUSTOMERS.forEach(c => {
     fields.forEach(f => {
-      if(c[f] && c[f].length > 200000) jobs.push({ c, f }); // only bother with photos that are actually large already
+      if(c[f] && c[f].startsWith && c[f].startsWith('data:') && c[f].length > 200000) jobs.push({ c, f }); // only bother with data-URL photos that are actually large already -- fields already migrated to a storage URL are short strings and skip naturally
     });
   });
   if(jobs.length === 0){
@@ -2369,8 +2424,12 @@ function compressAllStoredCustomerPhotos(btn){
   }
   let remaining = jobs.length;
   jobs.forEach(job => {
-    compressDataUrl(job.c[job.f], 1280, 0.72, result => {
+    compressDataUrl(job.c[job.f], 1280, 0.72, async result => {
       job.c[job.f] = result;
+      // Also try moving it out of the shared JSON blob entirely and into Storage -- this
+      // is what actually relieves the pressure on future saves, not just this one photo.
+      const url = await uploadToStorage(`${job.c.id}/${job.f}-${Date.now()}.jpg`, dataUrlToBlob(result));
+      if(url) job.c[job.f] = url;
       remaining--;
       if(remaining === 0){
         saveCustomers();
@@ -2391,7 +2450,7 @@ function customerDraftUpload(key, input){
   });
 }
 
-function submitCustomerSignup(){
+async function submitCustomerSignup(){
   const d = customerDraft;
   const errEl = document.getElementById('signup-err');
   const showErr = msg => { errEl.textContent = msg; errEl.style.display = 'block'; };
@@ -2450,6 +2509,16 @@ function submitCustomerSignup(){
     verificationStatus: 'pending',
   };
   CUSTOMERS.push(customer);
+  const btn = document.getElementById('signup-submit-btn');
+  if(btn){ btn.disabled = true; btn.textContent = 'Creating your profile…'; }
+  // Swap the embedded (already-compressed) photos for lightweight storage URLs before this
+  // record ever reaches localStorage/the cloud, where possible -- see
+  // uploadCustomerPhotosToStorage's comment for why this is what actually stops "the whole
+  // save breaks once too much has piled up" from recurring as more customers sign up. Falls
+  // back to the compressed data URLs automatically if storage isn't set up or reachable, so
+  // this never blocks the signup either way.
+  await uploadCustomerPhotosToStorage(customer);
+  if(btn){ btn.disabled = false; btn.textContent = 'Submit & create profile'; }
   saveCustomers(); // failures are retried automatically in the background (see scheduleBackgroundRetry) -- no action needed from the customer
   notifyIfNewCustomer(customer);
   state.currentCustomer = customer;
@@ -4837,11 +4906,14 @@ function updateCustomerField(id, field, val){
 function adminReplaceCustomerDoc(id, key, input){
   const file = input.files[0];
   if(!file) return;
-  compressImageFile(file, 1280, 0.72, dataUrl => {
+  compressImageFile(file, 1280, 0.72, async dataUrl => {
     if(!dataUrl) return;
     const c = CUSTOMERS.find(x => x.id === id);
     if(!c) return;
     c[key] = dataUrl;
+    renderAdmin();
+    const url = await uploadToStorage(`${c.id}/${key}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
+    if(url) c[key] = url;
     saveCustomers();
     renderAdmin();
   });
@@ -5061,7 +5133,7 @@ function docEditorReset(customerId, fieldKey){
 // resolution to edit it (openDocEditor above), so without this, saving here would
 // re-export at that same original size every time, undoing compression on any photo that
 // predates the fix (or slipped through some other way) the moment it's edited.
-function docEditorSave(){
+async function docEditorSave(){
   const final = docEditor.angle !== 0 ? rotatedCanvas(docEditor.baseCanvas, docEditor.angle) : docEditor.baseCanvas;
   const maxDim = 1280;
   let outCanvas = final;
@@ -5074,12 +5146,16 @@ function docEditorSave(){
   }
   const dataUrl = outCanvas.toDataURL('image/jpeg', 0.78);
   const c = CUSTOMERS.find(x => x.id === docEditor.customerId);
-  if(c){
-    c[docEditor.fieldKey] = dataUrl;
-    saveCustomers();
-  }
+  const fieldKey = docEditor.fieldKey;
   closeDocEditor();
   renderAdmin();
+  if(c){
+    c[fieldKey] = dataUrl;
+    const url = await uploadToStorage(`${c.id}/${fieldKey}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
+    if(url) c[fieldKey] = url;
+    saveCustomers();
+    renderAdmin();
+  }
 }
 
 // Lets admin modify an existing booking -- e.g. extend/shorten the rental dates, adjust the
