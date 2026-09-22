@@ -766,7 +766,7 @@ async function syncFromSupabase(){
     const merged = mergeById(CUSTOMERS, remoteCustomersCombined, ['modifiedAt', 'createdAt']);
     const localExtras = merged.filter(c => !remoteCustomersCombined.some(r => r.id === c.id));
     CUSTOMERS = merged;
-    try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
+    saveAllCustomersLocal();
     lastSyncOk.customers = true;
     localExtras.forEach(c => sbSetOneCustomer(c)); // this device had customers the cloud didn't yet -- push each up as its own small row so it catches up
   } else {
@@ -966,11 +966,65 @@ async function sbDeleteCustomerRow(id){
   }catch(e){ console.warn('Bike4u: sbDeleteCustomerRow failed for', id, e); return false; }
 }
 
+// Mirrors the per-row cloud fix above, on the local-storage side: previously every save
+// (even a single customer's) rewrote the *entire* customer list as one JSON string to one
+// localStorage key -- so a device that had accumulated a lot of cached photos over time
+// could hit its local storage limit on a brand new signup that had nothing to do with any
+// of that old data. Each customer now gets their own small localStorage entry instead,
+// with a lightweight index of ids so the full list can still be reconstructed for reading.
+const CUSTOMER_LOCAL_PREFIX = 'bike4u_customer_';
+const CUSTOMERS_INDEX_KEY = 'bike4u_customers_index_v1';
+function saveCustomerLocal(customer){
+  try{
+    localStorage.setItem(CUSTOMER_LOCAL_PREFIX + customer.id, JSON.stringify(stripPhotosForLocalStorage(customer)));
+    let ids = [];
+    try{ ids = JSON.parse(localStorage.getItem(CUSTOMERS_INDEX_KEY) || '[]'); }catch(e){}
+    if(!ids.includes(customer.id)){
+      ids.push(customer.id);
+      localStorage.setItem(CUSTOMERS_INDEX_KEY, JSON.stringify(ids));
+    }
+    return true;
+  }catch(e){ console.warn('Could not save customer locally:', customer.id, e); return false; }
+}
+function saveAllCustomersLocal(){
+  const ids = [];
+  let allOk = true;
+  CUSTOMERS.forEach(c => {
+    ids.push(c.id);
+    if(!saveCustomerLocal(c)) allOk = false;
+  });
+  try{ localStorage.setItem(CUSTOMERS_INDEX_KEY, JSON.stringify(ids)); }catch(e){ allOk = false; }
+  return allOk;
+}
+function deleteCustomerLocal(id){
+  try{
+    localStorage.removeItem(CUSTOMER_LOCAL_PREFIX + id);
+    let ids = [];
+    try{ ids = JSON.parse(localStorage.getItem(CUSTOMERS_INDEX_KEY) || '[]'); }catch(e){}
+    localStorage.setItem(CUSTOMERS_INDEX_KEY, JSON.stringify(ids.filter(x => x !== id)));
+  }catch(e){}
+}
+
 function loadCustomers(){
   try{
-    const saved = localStorage.getItem(CUSTOMERS_STORAGE_KEY);
-    if(saved){
-      const parsed = JSON.parse(saved);
+    const idxRaw = localStorage.getItem(CUSTOMERS_INDEX_KEY);
+    if(idxRaw){
+      const ids = JSON.parse(idxRaw);
+      if(Array.isArray(ids)){
+        const list = [];
+        ids.forEach(id => {
+          try{
+            const raw = localStorage.getItem(CUSTOMER_LOCAL_PREFIX + id);
+            if(raw) list.push(JSON.parse(raw));
+          }catch(e){}
+        });
+        return list;
+      }
+    }
+    // Migrate anything still under the old single-blob key from before this change.
+    const legacy = localStorage.getItem(CUSTOMERS_STORAGE_KEY);
+    if(legacy){
+      const parsed = JSON.parse(legacy);
       if(Array.isArray(parsed)) return parsed;
     }
   }catch(e){
@@ -984,11 +1038,14 @@ function loadCustomers(){
 // independent of everyone else's data. Only bulk actions (a full resync, the retry queue
 // catching up) omit it and push every customer as their own row.
 function saveCustomers(specificCustomer){
-  try{
-    localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS));
-  }catch(e){
-    console.warn('Could not save customer data:', e);
-    alert('Could not save your details. Your browser storage may be full -- this usually happens when the uploaded photos are large. Try using smaller/compressed images.');
+  const localOk = specificCustomer ? saveCustomerLocal(specificCustomer) : saveAllCustomersLocal();
+  if(!localOk){
+    console.warn('Could not save customer data locally (this browser\'s storage may be full).');
+    // Not fatal any more -- each customer's local entry is small on its own, so this now
+    // only happens if this specific device's *total* accumulated storage is genuinely
+    // full, not because of any one customer's photos. The cloud save below still proceeds
+    // either way, so the signup itself isn't blocked by this device's local cache being full.
+    alert("This device's browser storage is quite full, so your details couldn't be cached here for offline use -- but your profile will still be saved to our server normally. If you keep seeing this, try clearing some site data on this device.");
   }
   setPendingSync('customers', true);
   const pushFn = specificCustomer ? () => sbSetOneCustomer(specificCustomer) : pushAllCustomerRows;
@@ -1014,7 +1071,7 @@ function deleteCustomer(id){
   const warn = hasBookings ? ' This customer has existing bookings on record -- those bookings will NOT be deleted, but will no longer be linked to an active profile.' : '';
   if(!confirm(`Delete the profile for "${c.name || 'this customer'}"? This cannot be undone.${warn}`)) return;
   CUSTOMERS = CUSTOMERS.filter(x => x.id !== id);
-  try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
+  deleteCustomerLocal(id);
   sbDeleteCustomerRow(id);
   if(expandedCustomerId === id) expandedCustomerId = null;
   renderAdmin();
@@ -1892,6 +1949,7 @@ function searchVehicles(){
     document.getElementById('home-err').style.display = 'block';
     return;
   }
+  checkOverdueBookings(); // catch any vehicle that's become free purely because time passed since this was last checked
   state.page = 'list';
   render();
 }
@@ -2235,7 +2293,21 @@ function blankCustomerDraft(){
     email: '', password: '',
     name: '', mobile: '', emergency: '', address: '',
     selfie: null, aadharFront: null, aadharBack: null, licenseFront: null, licenseBack: null,
+    draftId: genId('draft'), // a stable path for uploading photos to Supabase Storage before the real customer record (and its id) exists yet
   };
+}
+
+// Removes any raw, not-yet-uploaded photo (a data: URL) before something is written to
+// this browser's local storage -- used everywhere a customer or draft object gets
+// persisted locally, so local storage can never end up holding image bytes, only small
+// Supabase Storage URLs (or nothing, for a photo still mid-upload). See uploadDraftPhoto
+// and uploadCustomerPhotosToStorage for where those URLs actually come from.
+function stripPhotosForLocalStorage(obj){
+  const copy = Object.assign({}, obj);
+  DOC_FIELDS.forEach(f => {
+    if(copy[f.key] && typeof copy[f.key] === 'string' && copy[f.key].startsWith('data:')) delete copy[f.key];
+  });
+  return copy;
 }
 
 // Auto-saves signup progress to this browser so a refresh, accidental tab close, or lost
@@ -2256,7 +2328,7 @@ function loadCustomerDraft(){
 }
 function saveCustomerDraft(){
   try{
-    localStorage.setItem(CUSTOMER_DRAFT_KEY, JSON.stringify(customerDraft));
+    localStorage.setItem(CUSTOMER_DRAFT_KEY, JSON.stringify(stripPhotosForLocalStorage(customerDraft)));
   }catch(e){
     console.warn('Could not auto-save signup progress (storage may be full):', e);
   }
@@ -2341,22 +2413,22 @@ function renderCustomerSignup(){
         <div class="form-section">
           <div class="form-section-title">Verification documents</div>
           <div class="doc-upload-grid">
-            ${DOC_FIELDS.map(f => `
+            ${DOC_FIELDS.map(f => {
+              const status = d[f.key + 'Status'];
+              const statusLabel = status === 'uploading' ? '⏳ Uploading to server…' : status === 'failed' ? '⚠ Upload failed — will retry' : d[f.key] ? '✓ Uploaded' : 'Required';
+              return `
               <div class="doc-upload ${d[f.key] ? 'has-file' : ''}">
                 <div class="doc-upload-preview">
                   ${d[f.key] ? `<img src="${d[f.key]}" alt="${f.label}">` : `<div class="ph-empty">No file</div>`}
                 </div>
                 <label>${f.label}</label>
-                <span class="doc-status">${d[f.key] ? 'Uploaded' : 'Required'}</span>
-                <div style="display:flex;gap:6px;">
-                  <button type="button" class="doc-upload-btn" style="flex:1;" onclick="openDocCamera('${f.key}')">📷 ${d[f.key] ? 'Retake' : 'Take photo'}</button>
-                  <label class="doc-upload-btn" style="flex:1;">
-                    ${d[f.key] ? 'Replace' : 'Choose file'}
-                    <input type="file" accept="image/*" onchange="customerDraftUpload('${f.key}', this)">
-                  </label>
-                </div>
+                <span class="doc-status" style="${status === 'failed' ? 'color:#F3A19C;' : status === 'uploading' ? 'color:var(--yellow);' : ''}">${statusLabel}</span>
+                <label class="doc-upload-btn">
+                  ${d[f.key] ? 'Replace' : 'Choose file'}
+                  <input type="file" accept="image/*" onchange="customerDraftUpload('${f.key}', this)">
+                </label>
               </div>
-            `).join('')}
+            `;}).join('')}
           </div>
         </div>
 
@@ -2529,14 +2601,36 @@ function compressAllStoredCustomerPhotos(btn){
   });
 }
 
+// Uploads a freshly-captured/chosen photo to Supabase Storage right away, rather than
+// waiting until the whole form is submitted -- this shrinks the window where the photo
+// only exists in this tab's memory (never in local storage, per stripPhotosForLocalStorage
+// above) down to roughly the time it takes to fill in the rest of the form, instead of
+// however long the whole signup takes. uploadCustomerPhotosToStorage at submission time
+// still re-attempts anything that didn't finish here as a final safety net.
+async function uploadDraftPhoto(key, dataUrl){
+  customerDraft[key + 'Status'] = 'uploading';
+  renderCustomerSignup();
+  let blob;
+  try{ blob = dataUrlToBlob(dataUrl); }catch(e){ customerDraft[key + 'Status'] = 'failed'; renderCustomerSignup(); return; }
+  const url = await uploadToStorage(`${customerDraft.draftId}/${key}-${Date.now()}.jpg`, blob);
+  if(url){
+    customerDraft[key] = url;
+    customerDraft[key + 'Status'] = 'done';
+  } else {
+    customerDraft[key + 'Status'] = 'failed'; // dataUrl stays in memory for now (not persisted locally) -- submission will retry, or the customer can tap Retry
+  }
+  saveCustomerDraft();
+  renderCustomerSignup();
+}
+
 function customerDraftUpload(key, input){
   const file = input.files[0];
   if(!file) return;
   compressImageFile(file, 1280, 0.72, dataUrl => {
     if(!dataUrl) return;
     customerDraft[key] = dataUrl;
-    saveCustomerDraft();
     renderCustomerSignup();
+    uploadDraftPhoto(key, dataUrl);
   });
 }
 
@@ -2651,8 +2745,8 @@ async function docCamUsePhoto(){
   closeDocCamera();
   if(target.mode === 'draft'){
     customerDraft[key] = dataUrl;
-    saveCustomerDraft();
     renderCustomerSignup();
+    uploadDraftPhoto(key, dataUrl);
   } else {
     const c = CUSTOMERS.find(x => x.id === target.customerId);
     if(c){
@@ -2826,7 +2920,7 @@ async function resyncMyProfile(btn){
   if(!state.currentCustomer) return;
   const c = state.currentCustomer;
   if(!CUSTOMERS.some(x => x.id === c.id)) CUSTOMERS.push(c);
-  try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
+  saveCustomerLocal(c);
   if(btn){ btn.disabled = true; btn.textContent = 'Syncing…'; }
 
   // Now that each customer saves as their own small row (see sbSetOneCustomer's comment),
@@ -3180,7 +3274,7 @@ async function subscribeAdminRealtime(){
         const freshOnes = arr.filter(c => !existingIds.has(c.id));
         if(freshOnes.length){
           CUSTOMERS = mergeById(CUSTOMERS, arr, ['modifiedAt', 'createdAt']);
-          try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
+          freshOnes.forEach(c => saveCustomerLocal(c));
           freshOnes.forEach(notifyIfNewCustomer);
           if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
         }
@@ -5081,6 +5175,7 @@ function sendInvoiceOnWhatsapp(id, kind, extension){
 
 function setAdminTab(tab){
   state.adminTab = tab;
+  if(tab === 'vehicles') checkOverdueBookings(); // catch any vehicle that's become free purely because time passed since this was last open
   renderAdmin();
 }
 
@@ -5754,21 +5849,6 @@ function restartTour(){
   resumePendingSyncs(); // picks up any signup/booking that failed to reach the cloud in a previous session on this device, and quietly finishes the job
   applySavedTheme();
   maybeStartHomeTour();
-
-  // Keep the "Rented until.../Available now" badges (admin Fleet tab and the customer
-  // vehicle list) accurate even when nothing else changes -- a vehicle becomes free purely
-  // because time passed, not because any record was edited, so a periodic re-render is
-  // needed to catch it. Narrowed to just the two screens that actually show those badges,
-  // since a re-render anywhere else on a timer would be visible churn for no reason --
-  // everything else (bookings, customers, coupons) already refreshes via the realtime
-  // handlers above when there's genuinely new data, not on a blind timer.
-  setInterval(() => {
-    checkOverdueBookings();
-    syncFromSupabase(); // periodic pull so new signups/bookings from other devices show up without a manual reload
-    resumePendingSyncs();
-    const onFleetView = (state.isAdmin && state.page === 'admin' && state.adminTab === 'vehicles') || state.page === 'list';
-    if(onFleetView && !userIsActivelyEditing()) silentRefresh(render);
-  }, 60000);
 })();
 </script>
 
