@@ -740,8 +740,8 @@ function mergeById(local, remote, tsFields){
 }
 
 async function syncFromSupabase(){
-  const [remoteVehicles, remoteCustomers, remoteBookings, remoteNotifications, remotePaymentSettings, remoteTerms] = await Promise.all([
-    sbGet('vehicles'), sbGet('customers'), sbGet('bookings'), sbGet('notifications'), sbGet('paymentSettings'), sbGet('terms')
+  const [remoteVehicles, remoteCustomerRows, remoteCustomersLegacy, remoteBookings, remoteNotifications, remotePaymentSettings, remoteTerms] = await Promise.all([
+    sbGet('vehicles'), sbGetAllCustomerRows(), sbGet('customers'), sbGet('bookings'), sbGet('notifications'), sbGet('paymentSettings'), sbGet('terms')
   ]);
 
   if(Array.isArray(remoteVehicles) && remoteVehicles.length){
@@ -751,17 +751,26 @@ async function syncFromSupabase(){
     sbSet('vehicles', VEHICLES);
   }
 
-  // Guarded the same way as vehicles above, plus merged rather than swapped wholesale --
-  // see mergeById's comment for why a plain replace was the real bug here.
-  if(Array.isArray(remoteCustomers) && (remoteCustomers.length || CUSTOMERS.length === 0)){
-    const merged = mergeById(CUSTOMERS, remoteCustomers, ['modifiedAt', 'createdAt']);
-    const localHadExtra = merged.length > remoteCustomers.length;
+  // Customers now live as one small row per customer (see sbGetAllCustomerRows/
+  // sbSetOneCustomer's comments) rather than one shared blob -- this pulls both that and
+  // anything still sitting under the old single-blob scheme (remoteCustomersLegacy, kept
+  // only for migrating data saved before this change) and merges everything together.
+  // Guarded and merged the same way as before: an empty/missing remote result never wipes
+  // out customers this browser already has, and matching ids keep whichever is newer.
+  const remoteCustomersCombined = mergeById(
+    Array.isArray(remoteCustomerRows) ? remoteCustomerRows : [],
+    Array.isArray(remoteCustomersLegacy) ? remoteCustomersLegacy : [],
+    ['modifiedAt', 'createdAt']
+  );
+  if(remoteCustomersCombined.length || CUSTOMERS.length === 0){
+    const merged = mergeById(CUSTOMERS, remoteCustomersCombined, ['modifiedAt', 'createdAt']);
+    const localExtras = merged.filter(c => !remoteCustomersCombined.some(r => r.id === c.id));
     CUSTOMERS = merged;
     try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
     lastSyncOk.customers = true;
-    if(localHadExtra) sbSet('customers', CUSTOMERS); // this device had a customer the cloud didn't yet -- push the merged list back up so it catches up
+    localExtras.forEach(c => sbSetOneCustomer(c)); // this device had customers the cloud didn't yet -- push each up as its own small row so it catches up
   } else {
-    sbSet('customers', CUSTOMERS).then(ok => { lastSyncOk.customers = ok; if(state.isAdmin && state.page==='admin') render(); });
+    CUSTOMERS.forEach(c => sbSetOneCustomer(c));
   }
 
   if(Array.isArray(remoteBookings) && (remoteBookings.length || BOOKINGS.length === 0)){
@@ -875,21 +884,21 @@ function setPendingSync(key, pending){
     localStorage.setItem(PENDING_SYNC_KEY, JSON.stringify(cur));
   }catch(e){}
 }
-function scheduleBackgroundRetry(key, getArray, attempt){
+function scheduleBackgroundRetry(key, saveFn, attempt){
   attempt = attempt || 0;
   backgroundRetryActive[key] = true;
   if(attempt >= 8){ backgroundRetryActive[key] = false; return; } // stop escalating in this tab -- the pending flag stays set, so the next app load (see resumePendingSyncs) picks it back up
   const delay = Math.min(5000 * Math.pow(1.6, attempt), 60000);
   setTimeout(() => {
     if(!getPendingSync()[key]){ backgroundRetryActive[key] = false; return; } // already succeeded via some other path (e.g. the customer reopened the app and it resolved there) meanwhile
-    sbSet(key, getArray()).then(ok => {
+    saveFn().then(ok => {
       lastSyncOk[key] = ok;
       if(ok){
         setPendingSync(key, false);
         backgroundRetryActive[key] = false;
         if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
       } else {
-        scheduleBackgroundRetry(key, getArray, attempt + 1);
+        scheduleBackgroundRetry(key, saveFn, attempt + 1);
       }
     });
   }, delay);
@@ -897,8 +906,64 @@ function scheduleBackgroundRetry(key, getArray, attempt){
 let backgroundRetryActive = {};
 function resumePendingSyncs(){
   const pending = getPendingSync();
-  if(pending.customers && !backgroundRetryActive.customers) scheduleBackgroundRetry('customers', () => CUSTOMERS, 0);
-  if(pending.bookings && !backgroundRetryActive.bookings) scheduleBackgroundRetry('bookings', () => BOOKINGS, 0);
+  if(pending.customers && !backgroundRetryActive.customers) scheduleBackgroundRetry('customers', () => pushAllCustomerRows(), 0);
+  if(pending.bookings && !backgroundRetryActive.bookings) scheduleBackgroundRetry('bookings', () => sbSet('bookings', BOOKINGS), 0);
+}
+
+/* ============ PER-CUSTOMER CLOUD ROWS (the actual fix for "large uploads keep breaking
+   saving", replacing the single shared blob) ============
+   Every earlier attempt at this (compression, then Storage-bucket offloading) still left
+   one thing true: a signup's save had to succeed *together with* every other customer's
+   data in one shared blob, because they all lived under one 'customers' key. That meant
+   the combined weight of *everyone's* photos -- not just this signup's own -- could still
+   block a brand new customer from ever being saved, and that combined weight only ever
+   grows as the business gets more customers. Storing each customer as their own row
+   (key = 'customer_<id>') instead means a signup only ever has to save its own, small
+   amount of data -- completely independent of how many other customers exist or how
+   large anyone else's photos are. This uses the same 'app_data' table already in use
+   elsewhere, so it needs no extra setup on the Supabase side at all. */
+const CUSTOMER_ROW_PREFIX = 'customer_';
+async function sbGetAllCustomerRows(){
+  const client = await getSupabase();
+  if(!client) return null;
+  try{
+    const result = await withTimeout(
+      client.from('app_data').select('value').like('key', CUSTOMER_ROW_PREFIX + '%'),
+      10000,
+      { data: null, error: 'timeout' }
+    );
+    if(result.error){ console.warn('Bike4u: could not load customer rows --', (result.error && result.error.message) || result.error); return null; }
+    return (result.data || []).map(r => r.value).filter(Boolean);
+  }catch(e){ console.warn('Bike4u: sbGetAllCustomerRows failed', e); return null; }
+}
+async function sbSetOneCustomer(customer){
+  const client = await getSupabase();
+  if(!client) return false;
+  try{
+    const result = await withTimeout(
+      client.from('app_data').upsert({ key: CUSTOMER_ROW_PREFIX + customer.id, value: customer, updated_at: new Date().toISOString() }),
+      10000,
+      { error: 'timeout' }
+    );
+    if(result.error){ console.warn('Bike4u: customer row save failed for', customer.id, '--', (result.error && result.error.message) || result.error); return false; }
+    return true;
+  }catch(e){ console.warn('Bike4u: sbSetOneCustomer failed for', customer.id, e); return false; }
+}
+function pushAllCustomerRows(){
+  return Promise.all(CUSTOMERS.map(c => sbSetOneCustomer(c))).then(results => results.every(Boolean));
+}
+async function sbDeleteCustomerRow(id){
+  const client = await getSupabase();
+  if(!client) return false;
+  try{
+    const result = await withTimeout(
+      client.from('app_data').delete().eq('key', CUSTOMER_ROW_PREFIX + id),
+      10000,
+      { error: 'timeout' }
+    );
+    if(result.error){ console.warn('Bike4u: customer row delete failed for', id, '--', (result.error && result.error.message) || result.error); return false; }
+    return true;
+  }catch(e){ console.warn('Bike4u: sbDeleteCustomerRow failed for', id, e); return false; }
 }
 
 function loadCustomers(){
@@ -914,7 +979,11 @@ function loadCustomers(){
   return [];
 }
 
-function saveCustomers(){
+// Pass the specific customer that changed whenever known (signup, an edit, a document
+// replacement) so only that one small row is pushed -- this is what keeps a save fast and
+// independent of everyone else's data. Only bulk actions (a full resync, the retry queue
+// catching up) omit it and push every customer as their own row.
+function saveCustomers(specificCustomer){
   try{
     localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS));
   }catch(e){
@@ -922,15 +991,16 @@ function saveCustomers(){
     alert('Could not save your details. Your browser storage may be full -- this usually happens when the uploaded photos are large. Try using smaller/compressed images.');
   }
   setPendingSync('customers', true);
-  return sbSet('customers', CUSTOMERS).then(ok => {
+  const pushFn = specificCustomer ? () => sbSetOneCustomer(specificCustomer) : pushAllCustomerRows;
+  return pushFn().then(ok => {
     lastSyncOk.customers = ok;
     if(ok){
       setPendingSync('customers', false);
     } else {
-      // A failed cloud save here (most often the customer photos pushing the payload over
-      // Supabase's size limit) means this signup only exists on this one device/browser
-      // for now -- the background retry queue above takes over from here automatically.
-      scheduleBackgroundRetry('customers', () => CUSTOMERS, 0);
+      // A failed cloud save here (most often a genuinely poor connection, now that size is
+      // no longer the shared-blob bottleneck it used to be) hands off to the background
+      // retry queue, which re-pushes every customer's row until they all land.
+      scheduleBackgroundRetry('customers', () => pushAllCustomerRows(), 0);
     }
     if(!ok && state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
     return ok;
@@ -944,7 +1014,8 @@ function deleteCustomer(id){
   const warn = hasBookings ? ' This customer has existing bookings on record -- those bookings will NOT be deleted, but will no longer be linked to an active profile.' : '';
   if(!confirm(`Delete the profile for "${c.name || 'this customer'}"? This cannot be undone.${warn}`)) return;
   CUSTOMERS = CUSTOMERS.filter(x => x.id !== id);
-  saveCustomers();
+  try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
+  sbDeleteCustomerRow(id);
   if(expandedCustomerId === id) expandedCustomerId = null;
   renderAdmin();
 }
@@ -2589,7 +2660,7 @@ async function docCamUsePhoto(){
       renderAdmin();
       const url = await uploadToStorage(`${c.id}/${key}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
       if(url) c[key] = url;
-      saveCustomers();
+      saveCustomers(c);
       renderAdmin();
     }
   }
@@ -2673,7 +2744,7 @@ async function submitCustomerSignup(){
   // this never blocks the signup either way.
   await uploadCustomerPhotosToStorage(customer);
   if(btn){ btn.disabled = false; btn.textContent = 'Submit & create profile'; }
-  saveCustomers(); // failures are retried automatically in the background (see scheduleBackgroundRetry) -- no action needed from the customer
+  saveCustomers(customer); // failures are retried automatically in the background (see scheduleBackgroundRetry) -- no action needed from the customer
   notifyIfNewCustomer(customer);
   state.currentCustomer = customer;
   try{ localStorage.setItem(CUSTOMER_SESSION_KEY, customer.email); }catch(e){}
@@ -2758,24 +2829,24 @@ async function resyncMyProfile(btn){
   try{ localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(CUSTOMERS)); }catch(e){}
   if(btn){ btn.disabled = true; btn.textContent = 'Syncing…'; }
 
-  // A failure here is far more often "the photos are too large for one request" than an
-  // actual connectivity problem -- Supabase's error text for that doesn't always say so in
-  // plain words, so this checks the size directly rather than trusting a generic error
-  // message, and tailors what's shown accordingly instead of always blaming "the internet".
+  // Now that each customer saves as their own small row (see sbSetOneCustomer's comment),
+  // a failure here is no longer about everyone's combined photos -- it's specific to this
+  // one profile's own size or a genuine connection issue, so this checks this profile's own
+  // payload rather than the old "everyone's combined total" framing.
   let payloadMB = 0;
-  try{ payloadMB = new Blob([JSON.stringify(CUSTOMERS)]).size / 1024 / 1024; }catch(e){}
+  try{ payloadMB = new Blob([JSON.stringify(c)]).size / 1024 / 1024; }catch(e){}
 
   setPendingSync('customers', true);
-  const ok = await sbSet('customers', CUSTOMERS);
+  const ok = await sbSetOneCustomer(c);
   if(btn){ btn.disabled = false; btn.textContent = '🔄 Resync my details'; }
   lastSyncOk.customers = ok;
   if(ok){
     setPendingSync('customers', false);
     alert('Your full profile -- including your photos -- has been re-synced successfully.');
   } else {
-    scheduleBackgroundRetry('customers', () => CUSTOMERS, 0); // keeps trying quietly even if this manual attempt didn't land
+    scheduleBackgroundRetry('customers', () => sbSetOneCustomer(c), 0); // keeps trying quietly even if this manual attempt didn't land
     if(payloadMB > 4){
-      alert(`Couldn't sync -- the combined photos on file are quite large (about ${payloadMB.toFixed(1)}MB across everyone's profiles), which is most likely why this is failing rather than your connection. This should self-resolve automatically once the business runs "Compress stored photos" from their side -- it will keep retrying quietly in the background either way, so you don't need to do anything further.`);
+      alert(`Couldn't sync -- your own photos add up to about ${payloadMB.toFixed(1)}MB, which is likely why this is failing. It will keep retrying automatically in the background, so you don't need to do anything further -- but if it doesn't resolve, try retaking your photos at a lower resolution.`);
     } else {
       alert("Couldn't sync right now. Please check your connection -- it will also keep retrying automatically in the background, so you don't need to keep tapping this.");
     }
@@ -2864,7 +2935,7 @@ function forgotResetPassword(){
     return;
   }
   c.password = d.newPass;
-  saveCustomers();
+  saveCustomers(c);
   state.currentCustomer = c;
   try{ localStorage.setItem(CUSTOMER_SESSION_KEY, c.email); }catch(e){}
   onCustomerAuthenticated();
@@ -3651,7 +3722,7 @@ function saveNewCustomerManually(){
     addedByAdmin: true,
   };
   CUSTOMERS.push(customer);
-  saveCustomers();
+  saveCustomers(customer);
   notifiedCustomerIds.add(customer.id); // this device created it -- no local popup needed
   newCustomerDraft = null;
   renderAdmin();
@@ -3769,7 +3840,7 @@ function recoverCustomerFromBooking(bookingId){
   };
   CUSTOMERS.push(customer);
   bk.customerId = customer.id;
-  saveCustomers();
+  saveCustomers(customer);
   saveBookings();
   renderAdmin();
 }
@@ -5020,7 +5091,7 @@ function setCustomerVerification(id, status){
   const c = CUSTOMERS.find(x => x.id === id);
   if(!c) return;
   c.verificationStatus = status;
-  saveCustomers();
+  saveCustomers(c);
   renderAdmin();
 }
 
@@ -5043,7 +5114,7 @@ function updateCustomerField(id, field, val){
       return;
     }
     c[field] = v.toLowerCase();
-    saveCustomers();
+    saveCustomers(c);
     renderAdmin();
     return;
   } else if(!v){
@@ -5052,7 +5123,7 @@ function updateCustomerField(id, field, val){
     return;
   }
   c[field] = v;
-  saveCustomers();
+  saveCustomers(c);
   renderAdmin();
 }
 
@@ -5069,7 +5140,7 @@ function adminReplaceCustomerDoc(id, key, input){
     renderAdmin();
     const url = await uploadToStorage(`${c.id}/${key}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
     if(url) c[key] = url;
-    saveCustomers();
+    saveCustomers(c);
     renderAdmin();
   });
 }
@@ -5308,7 +5379,7 @@ async function docEditorSave(){
     c[fieldKey] = dataUrl;
     const url = await uploadToStorage(`${c.id}/${fieldKey}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
     if(url) c[fieldKey] = url;
-    saveCustomers();
+    saveCustomers(c);
     renderAdmin();
   }
 }
