@@ -403,6 +403,22 @@ if('serviceWorker' in navigator){
   .doc-upload .doc-status{display:block;font-size:10.5px;color:var(--text-dim);margin-bottom:8px;}
   .doc-upload.has-file .doc-status{color:#8FE4D5;}
   .doc-upload-btn{display:inline-block;background:transparent;border:1px solid var(--border-strong);color:var(--text-dim);padding:7px 12px;border-radius:7px;font-size:11.5px;font-weight:600;cursor:pointer;}
+  .doccam-overlay{position:fixed;inset:0;background:#000;z-index:600;display:flex;align-items:center;justify-content:center;overflow:hidden;}
+  .doccam-video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;}
+  .doccam-guide{position:relative;width:85%;max-width:420px;aspect-ratio:1.58/1;pointer-events:none;border:2px solid rgba(255,255,255,.55);border-radius:14px;box-shadow:0 0 0 2000px rgba(0,0,0,.55);}
+  .doccam-guide.doccam-guide-oval{aspect-ratio:3/4;max-width:280px;border-radius:50%;}
+  .doccam-corner{position:absolute;width:32px;height:32px;border-color:var(--yellow);border-style:solid;border-width:0;}
+  .doccam-corner.tl{top:-2px;left:-2px;border-top-width:5px;border-left-width:5px;border-radius:8px 0 0 0;}
+  .doccam-corner.tr{top:-2px;right:-2px;border-top-width:5px;border-right-width:5px;border-radius:0 8px 0 0;}
+  .doccam-corner.bl{bottom:-2px;left:-2px;border-bottom-width:5px;border-left-width:5px;border-radius:0 0 0 8px;}
+  .doccam-corner.br{bottom:-2px;right:-2px;border-bottom-width:5px;border-right-width:5px;border-radius:0 0 8px 0;}
+  .doccam-hint{position:absolute;bottom:132px;left:0;right:0;text-align:center;color:#fff;font-size:13.5px;font-weight:600;padding:0 28px;text-shadow:0 1px 5px rgba(0,0,0,.7);line-height:1.4;}
+  .doccam-controls{position:absolute;bottom:26px;left:0;right:0;display:flex;align-items:center;justify-content:center;gap:36px;}
+  .doccam-shutter{width:66px;height:66px;border-radius:50%;background:#fff;border:4px solid rgba(255,255,255,.35);box-shadow:0 0 0 3px #fff inset;flex-shrink:0;}
+  .doccam-shutter:active{transform:scale(.92);}
+  .doccam-cancel{width:44px;height:44px;border-radius:50%;background:rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.35);color:#fff;font-size:18px;flex-shrink:0;}
+  .doccam-preview-wrap{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#000;padding:20px;}
+  .doccam-preview-img{max-width:100%;max-height:70vh;border-radius:10px;object-fit:contain;box-shadow:0 8px 30px rgba(0,0,0,.5);}
   .doc-upload-btn:hover{color:var(--text);}
   .doc-upload-btn input{display:none;}
 
@@ -2136,11 +2152,11 @@ I have agreed to the Terms & Conditions for this booking. Please confirm availab
 
 /* ============ CUSTOMER: SIGNUP / LOGIN / ACCOUNT ============ */
 const DOC_FIELDS = [
-  { key: 'selfie',        label: 'Selfie photo' },
-  { key: 'aadharFront',   label: 'Aadhar card (front)' },
-  { key: 'aadharBack',    label: 'Aadhar card (back)' },
-  { key: 'licenseFront',  label: 'Driving licence (front)' },
-  { key: 'licenseBack',   label: 'Driving licence (back)' },
+  { key: 'selfie',        label: 'Selfie photo', docType: 'selfie' },
+  { key: 'aadharFront',   label: 'Aadhar card (front)', docType: 'document' },
+  { key: 'aadharBack',    label: 'Aadhar card (back)', docType: 'document' },
+  { key: 'licenseFront',  label: 'Driving licence (front)', docType: 'document' },
+  { key: 'licenseBack',   label: 'Driving licence (back)', docType: 'document' },
 ];
 
 function blankCustomerDraft(){
@@ -2261,10 +2277,13 @@ function renderCustomerSignup(){
                 </div>
                 <label>${f.label}</label>
                 <span class="doc-status">${d[f.key] ? 'Uploaded' : 'Required'}</span>
-                <label class="doc-upload-btn">
-                  ${d[f.key] ? 'Replace' : 'Choose file'}
-                  <input type="file" accept="image/*" onchange="customerDraftUpload('${f.key}', this)">
-                </label>
+                <div style="display:flex;gap:6px;">
+                  <button type="button" class="doc-upload-btn" style="flex:1;" onclick="openDocCamera('${f.key}')">📷 ${d[f.key] ? 'Retake' : 'Take photo'}</button>
+                  <label class="doc-upload-btn" style="flex:1;">
+                    ${d[f.key] ? 'Replace' : 'Choose file'}
+                    <input type="file" accept="image/*" onchange="customerDraftUpload('${f.key}', this)">
+                  </label>
+                </div>
               </div>
             `).join('')}
           </div>
@@ -2448,6 +2467,141 @@ function customerDraftUpload(key, input){
     saveCustomerDraft();
     renderCustomerSignup();
   });
+}
+
+/* ============ IN-PAGE DOCUMENT CAMERA ============
+   A plain <input type="file" capture> hands the whole job to the phone's own native
+   camera app, which a website has no way to draw an overlay on top of -- so there's no
+   way to show "align the four corners here" guidance through that route at all. This
+   instead opens the camera feed directly in the page (getUserMedia) and draws the guide
+   as part of the page itself, the same way a dedicated scanning app would. Falls back to
+   telling the customer to use "Choose file" if the browser/device can't do this (no
+   camera API support, or permission denied) -- that path still works exactly as before. */
+let docCamStream = null;
+let docCamTarget = null; // { mode: 'draft' } or { mode: 'customer', customerId }
+let docCamKey = null;
+let docCamCapturedCanvas = null;
+
+async function openDocCamera(key, customerId){
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    alert('Live camera capture isn\'t supported in this browser -- please use "Choose file" instead and take the photo from there.');
+    return;
+  }
+  docCamKey = key;
+  docCamTarget = customerId ? { mode: 'customer', customerId } : { mode: 'draft' };
+  try{
+    docCamStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+  }catch(e){
+    alert('Could not access the camera -- please check the camera permission for this site in your browser settings, or use "Choose file" instead.');
+    return;
+  }
+  renderDocCamModal();
+}
+
+function renderDocCamModal(){
+  let overlay = document.getElementById('doccam-overlay');
+  if(!overlay){
+    overlay = document.createElement('div');
+    overlay.id = 'doccam-overlay';
+    overlay.className = 'doccam-overlay';
+    document.body.appendChild(overlay);
+  }
+  const field = DOC_FIELDS.find(f => f.key === docCamKey) || {};
+  const isSelfie = field.docType === 'selfie';
+  overlay.innerHTML = `
+    <video id="doccam-video" class="doccam-video" autoplay playsinline muted></video>
+    <div class="doccam-guide ${isSelfie ? 'doccam-guide-oval' : ''}">
+      ${!isSelfie ? `<span class="doccam-corner tl"></span><span class="doccam-corner tr"></span><span class="doccam-corner bl"></span><span class="doccam-corner br"></span>` : ''}
+    </div>
+    <div class="doccam-hint">${isSelfie ? 'Centre your face within the frame' : `Align all four corners of your ${field.label || 'document'} within the frame`}</div>
+    <div class="doccam-controls">
+      <button class="doccam-cancel" onclick="closeDocCamera()">✕</button>
+      <button class="doccam-shutter" onclick="docCamCapture()" title="Capture"></button>
+      <span style="width:44px;flex-shrink:0;"></span>
+    </div>
+  `;
+  const video = document.getElementById('doccam-video');
+  video.srcObject = docCamStream;
+}
+
+function docCamCapture(){
+  const video = document.getElementById('doccam-video');
+  if(!video || !video.videoWidth) return;
+  const canvas = document.createElement('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext('2d').drawImage(video, 0, 0);
+  docCamCapturedCanvas = canvas;
+  if(docCamStream){ docCamStream.getTracks().forEach(t => t.stop()); docCamStream = null; } // release the camera while reviewing the shot
+  renderDocCamPreview();
+}
+
+function renderDocCamPreview(){
+  const overlay = document.getElementById('doccam-overlay');
+  if(!overlay) return;
+  const field = DOC_FIELDS.find(f => f.key === docCamKey) || {};
+  overlay.innerHTML = `
+    <div class="doccam-preview-wrap">
+      <img src="${docCamCapturedCanvas.toDataURL('image/jpeg', 0.85)}" class="doccam-preview-img" alt="Captured photo">
+    </div>
+    <div class="doccam-hint" style="bottom:100px;">Is your ${field.label || 'photo'} clear and fully visible?</div>
+    <div class="doccam-controls">
+      <button class="btn-ghost" style="width:auto;background:rgba(0,0,0,.5);color:#fff;border-color:rgba(255,255,255,.35);" onclick="docCamRetake()">↺ Retake</button>
+      <button class="btn-primary" style="width:auto;margin:0;padding:12px 26px;" onclick="docCamUsePhoto()">✓ Use this photo</button>
+    </div>
+  `;
+}
+
+async function docCamRetake(){
+  docCamCapturedCanvas = null;
+  try{
+    docCamStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+  }catch(e){
+    alert('Could not access the camera again -- please use "Choose file" instead.');
+    closeDocCamera();
+    return;
+  }
+  renderDocCamModal();
+}
+
+async function docCamUsePhoto(){
+  const canvas = docCamCapturedCanvas;
+  const maxDim = 1280, quality = 0.72;
+  let w = canvas.width, h = canvas.height, outCanvas = canvas;
+  if(w > maxDim || h > maxDim){
+    if(w > h){ h = Math.round(h * maxDim / w); w = maxDim; } else { w = Math.round(w * maxDim / h); h = maxDim; }
+    outCanvas = document.createElement('canvas');
+    outCanvas.width = w; outCanvas.height = h;
+    outCanvas.getContext('2d').drawImage(canvas, 0, 0, w, h);
+  }
+  const dataUrl = outCanvas.toDataURL('image/jpeg', quality);
+  const key = docCamKey;
+  const target = docCamTarget;
+  closeDocCamera();
+  if(target.mode === 'draft'){
+    customerDraft[key] = dataUrl;
+    saveCustomerDraft();
+    renderCustomerSignup();
+  } else {
+    const c = CUSTOMERS.find(x => x.id === target.customerId);
+    if(c){
+      c[key] = dataUrl;
+      renderAdmin();
+      const url = await uploadToStorage(`${c.id}/${key}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
+      if(url) c[key] = url;
+      saveCustomers();
+      renderAdmin();
+    }
+  }
+}
+
+function closeDocCamera(){
+  if(docCamStream){ docCamStream.getTracks().forEach(t => t.stop()); docCamStream = null; }
+  const el = document.getElementById('doccam-overlay');
+  if(el) el.remove();
+  docCamCapturedCanvas = null;
+  docCamKey = null;
+  docCamTarget = null;
 }
 
 async function submitCustomerSignup(){
@@ -3402,6 +3556,7 @@ function customerCardHtml(c){
               ${c[f.key] ? 'Replace' : 'Add'}
               <input type="file" accept="image/*" style="display:none;" onchange="adminReplaceCustomerDoc('${c.id}','${f.key}', this)">
             </label>
+            <button style="font-size:9.5px;color:var(--yellow);text-align:center;cursor:pointer;background:none;border:none;padding:0;font-family:inherit;" onclick="openDocCamera('${f.key}','${c.id}')">📷 Camera</button>
             ${c[f.key] ? `<button style="font-size:9.5px;color:var(--teal);text-align:center;cursor:pointer;background:none;border:none;padding:0;font-family:inherit;" onclick="openDocEditor('${c.id}','${f.key}')">Edit</button>` : ''}
           </div>
         `).join('')}
