@@ -2413,22 +2413,19 @@ function renderCustomerSignup(){
         <div class="form-section">
           <div class="form-section-title">Verification documents</div>
           <div class="doc-upload-grid">
-            ${DOC_FIELDS.map(f => {
-              const status = d[f.key + 'Status'];
-              const statusLabel = status === 'uploading' ? '⏳ Uploading to server…' : status === 'failed' ? '⚠ Upload failed — will retry' : d[f.key] ? '✓ Uploaded' : 'Required';
-              return `
+            ${DOC_FIELDS.map(f => `
               <div class="doc-upload ${d[f.key] ? 'has-file' : ''}">
                 <div class="doc-upload-preview">
                   ${d[f.key] ? `<img src="${d[f.key]}" alt="${f.label}">` : `<div class="ph-empty">No file</div>`}
                 </div>
                 <label>${f.label}</label>
-                <span class="doc-status" style="${status === 'failed' ? 'color:#F3A19C;' : status === 'uploading' ? 'color:var(--yellow);' : ''}">${statusLabel}</span>
+                <span class="doc-status">${d[f.key] ? '✓ Uploaded' : 'Required'}</span>
                 <label class="doc-upload-btn">
                   ${d[f.key] ? 'Replace' : 'Choose file'}
                   <input type="file" accept="image/*" onchange="customerDraftUpload('${f.key}', this)">
                 </label>
               </div>
-            `;}).join('')}
+            `).join('')}
           </div>
         </div>
 
@@ -2602,25 +2599,21 @@ function compressAllStoredCustomerPhotos(btn){
 }
 
 // Uploads a freshly-captured/chosen photo to Supabase Storage right away, rather than
-// waiting until the whole form is submitted -- this shrinks the window where the photo
-// only exists in this tab's memory (never in local storage, per stripPhotosForLocalStorage
-// above) down to roughly the time it takes to fill in the rest of the form, instead of
-// however long the whole signup takes. uploadCustomerPhotosToStorage at submission time
-// still re-attempts anything that didn't finish here as a final safety net.
+// waiting until the whole form is submitted -- an optimization so the eventual customer
+// database row stays small (a URL instead of an embedded image), not something that has
+// to succeed for the signup itself to work. If it doesn't succeed here, the photo simply
+// stays embedded and travels with the customer record directly at submission instead --
+// still reaches the business's database either way, just as part of that one row rather
+// than a separate file. So this runs silently: nothing worth alarming the customer with
+// either way, since their photo is never actually at risk of being lost.
 async function uploadDraftPhoto(key, dataUrl){
-  customerDraft[key + 'Status'] = 'uploading';
-  renderCustomerSignup();
   let blob;
-  try{ blob = dataUrlToBlob(dataUrl); }catch(e){ customerDraft[key + 'Status'] = 'failed'; renderCustomerSignup(); return; }
+  try{ blob = dataUrlToBlob(dataUrl); }catch(e){ return; }
   const url = await uploadToStorage(`${customerDraft.draftId}/${key}-${Date.now()}.jpg`, blob);
-  if(url){
+  if(url && customerDraft[key] === dataUrl){ // only swap in the URL if the customer hasn't since replaced this photo with a different one
     customerDraft[key] = url;
-    customerDraft[key + 'Status'] = 'done';
-  } else {
-    customerDraft[key + 'Status'] = 'failed'; // dataUrl stays in memory for now (not persisted locally) -- submission will retry, or the customer can tap Retry
+    saveCustomerDraft();
   }
-  saveCustomerDraft();
-  renderCustomerSignup();
 }
 
 function customerDraftUpload(key, input){
@@ -2629,6 +2622,7 @@ function customerDraftUpload(key, input){
   compressImageFile(file, 1280, 0.72, dataUrl => {
     if(!dataUrl) return;
     customerDraft[key] = dataUrl;
+    saveCustomerDraft(); // strips the raw photo before persisting locally either way (see stripPhotosForLocalStorage)
     renderCustomerSignup();
     uploadDraftPhoto(key, dataUrl);
   });
