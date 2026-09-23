@@ -1481,15 +1481,28 @@ function vehicleActiveBooking(vehicleId){
 
 function vehicleRentalStatus(vehicleId){
   const bk = vehicleActiveBooking(vehicleId);
-  if(!bk) return { rented: false };
   const now = new Date();
-  const end = new Date(bk.dropDate + 'T' + bk.dropTime);
+  let untilDate = null, untilTime = null, source = null;
+  if(bk){
+    untilDate = bk.dropDate; untilTime = bk.dropTime; source = 'booking';
+  }
+  // A manual "mark as rented" block (no real booking behind it -- e.g. an informal/offline
+  // loan, or blocking time out for servicing) counts the same way, and wins if it runs
+  // later than any actual booking's drop-off.
+  const v = VEHICLES.find(x => x.id === vehicleId);
+  if(v && v.manualBlockUntil && v.manualBlockUntil.date){
+    const manualEnd = new Date(v.manualBlockUntil.date + 'T' + (v.manualBlockUntil.time || '23:59'));
+    if(manualEnd > now && (!untilDate || manualEnd > new Date(untilDate + 'T' + untilTime))){
+      untilDate = v.manualBlockUntil.date; untilTime = v.manualBlockUntil.time; source = 'manual';
+    }
+  }
+  if(!untilDate) return { rented: false };
+  const end = new Date(untilDate + 'T' + untilTime);
   return {
     rented: true,
-    overdue: now > end,
+    overdue: source === 'booking' && now > end, // a manual block has no "overdue" concept -- admin set it deliberately and clears it themselves
     booking: bk,
-    untilDate: bk.dropDate,
-    untilTime: bk.dropTime,
+    untilDate, untilTime, source,
   };
 }
 
@@ -1512,7 +1525,7 @@ function vehicleConflictingBookings(vehicleId, pickupDate, pickupTime, dropDate,
   const reqStart = new Date(pickupDate + 'T' + pickupTime);
   const reqEnd = new Date(dropDate + 'T' + dropTime);
   if(isNaN(reqStart) || isNaN(reqEnd) || reqEnd <= reqStart) return [];
-  return BOOKINGS.filter(bk => {
+  const conflicts = BOOKINGS.filter(bk => {
     if(bk.vehicleId !== vehicleId) return false;
     if(bk.returnedAt) return false; // admin has cleared it off the vehicle -- no longer occupies the schedule
     if(bk.cancelled) return false;
@@ -1521,6 +1534,26 @@ function vehicleConflictingBookings(vehicleId, pickupDate, pickupTime, dropDate,
     const exEnd = new Date(bk.dropDate + 'T' + bk.dropTime);
     return rangesOverlap(reqStart, reqEnd, exStart, exEnd);
   });
+  // A manual "mark as rented" block occupies the schedule the same way a real booking
+  // does, from the moment it's set until the chosen return time -- represented here as a
+  // synthetic conflict entry so the exact same overlap/next-available logic used for real
+  // bookings applies to it too, without duplicating that logic.
+  const v = VEHICLES.find(x => x.id === vehicleId);
+  if(v && v.manualBlockUntil && v.manualBlockUntil.date){
+    const blockEnd = new Date(v.manualBlockUntil.date + 'T' + (v.manualBlockUntil.time || '23:59'));
+    const now = new Date();
+    if(blockEnd > now && rangesOverlap(reqStart, reqEnd, now, blockEnd)){
+      const pad = n => String(n).padStart(2,'0');
+      conflicts.push({
+        id: 'MANUAL-BLOCK-' + v.id,
+        vehicleId: v.id,
+        pickupDate: dateOnlyStr(now), pickupTime: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
+        dropDate: v.manualBlockUntil.date, dropTime: v.manualBlockUntil.time,
+        customerName: 'marked unavailable by admin',
+      });
+    }
+  }
+  return conflicts;
 }
 
 // The latest drop-off among a set of conflicting bookings -- i.e. the earliest moment the
@@ -3676,7 +3709,9 @@ function vehicleSummaryCardHtml(v){
     statusBadge = rs.overdue
       ? `<span class="badge badge-overdue">⚠ Overdue · was due ${fmtDate(rs.untilDate)}, ${fmtTime(rs.untilTime)}</span>`
       : `<span class="badge badge-rented">Rented · back ${fmtDate(rs.untilDate)}, ${fmtTime(rs.untilTime)}</span>`;
-    markBtn = `<button class="btn-ghost" style="padding:3px 8px;font-size:11.5px;background:#123A28;color:#7EE2B8;border-color:#123A28;" onclick="markBookingReturned('${rs.booking.id}', true)" title="Booking ${bookingDisplayNumber(rs.booking.id)} · ${rs.booking.customerName}">✅ Mark returned</button>`;
+    markBtn = rs.source === 'manual'
+      ? `<button class="btn-ghost" style="padding:3px 8px;font-size:11.5px;background:#123A28;color:#7EE2B8;border-color:#123A28;" onclick="event.stopPropagation();clearManualBlock('${v.id}')" title="Manually marked rented by admin">✅ Clear</button>`
+      : `<button class="btn-ghost" style="padding:3px 8px;font-size:11.5px;background:#123A28;color:#7EE2B8;border-color:#123A28;" onclick="event.stopPropagation();markBookingReturned('${rs.booking.id}', true)" title="Booking ${bookingDisplayNumber(rs.booking.id)} · ${rs.booking.customerName}">✅ Mark returned</button>`;
   }
   return `
     <div class="vehicle-summary-card" onclick="toggleVehicleExpand('${v.id}')">
@@ -3713,7 +3748,10 @@ function vehicleCardHtml(v){
                   const badge = rs.overdue
                     ? `<span class="badge badge-overdue">⚠ Overdue · was due ${fmtDate(rs.untilDate)}, ${fmtTime(rs.untilTime)}</span>`
                     : `<span class="badge badge-rented">Rented · back ${fmtDate(rs.untilDate)}, ${fmtTime(rs.untilTime)}</span>`;
-                  return badge + `<button class="btn-ghost" style="padding:3px 8px;font-size:11.5px;background:#123A28;color:#7EE2B8;border-color:#123A28;" onclick="markBookingReturned('${rs.booking.id}', true)" title="Booking ${bookingDisplayNumber(rs.booking.id)} · ${rs.booking.customerName}">✅ Mark returned</button>`;
+                  const clearBtn = rs.source === 'manual'
+                    ? `<button class="btn-ghost" style="padding:3px 8px;font-size:11.5px;background:#123A28;color:#7EE2B8;border-color:#123A28;" onclick="clearManualBlock('${v.id}')" title="Manually marked rented by admin">✅ Clear</button>`
+                    : `<button class="btn-ghost" style="padding:3px 8px;font-size:11.5px;background:#123A28;color:#7EE2B8;border-color:#123A28;" onclick="markBookingReturned('${rs.booking.id}', true)" title="Booking ${bookingDisplayNumber(rs.booking.id)} · ${rs.booking.customerName}">✅ Mark returned</button>`;
+                  return badge + clearBtn;
                 })()}
               </div>
               <label class="photo-upload-label">
@@ -3759,9 +3797,50 @@ function vehicleCardHtml(v){
           <div class="avcard-actions">
             <button class="toggle-btn ${v.hidden ? 'on' : ''}" onclick="toggleHidden('${v.id}')">${v.hidden ? 'Unhide vehicle' : 'Hide vehicle'}</button>
             <button class="toggle-btn ${v.soldOut ? 'on danger' : ''}" onclick="toggleSoldOut('${v.id}')">${v.soldOut ? 'Mark as available' : 'Mark as sold out'}</button>
+            ${v.manualBlockUntil && v.manualBlockUntil.date
+              ? `<button class="toggle-btn on danger" onclick="clearManualBlock('${v.id}')">Clear manual "Rented" mark</button>`
+              : `<button class="toggle-btn" onclick="toggleManualBlockForm('${v.id}')">${manualBlockDraft === v.id ? 'Cancel' : 'Mark as rented…'}</button>`}
           </div>
+          ${manualBlockDraft === v.id ? `
+          <div class="avcard-fields wide" style="margin-top:10px;">
+            <div class="field">
+              <label>Back date</label>
+              <input type="date" id="manual-block-date-${v.id}" value="${dateOnlyStr(new Date())}">
+            </div>
+            <div class="field">
+              <label>Back time</label>
+              <input type="time" id="manual-block-time-${v.id}" value="18:00">
+            </div>
+          </div>
+          <p class="field-hint" style="margin-bottom:8px;">Marks this vehicle rented right now, showing customers "Rented · back [date], [time]" and blocking them from booking it until then — no booking record needed (e.g. an informal loan, or time blocked out for servicing).</p>
+          <button class="btn-primary" style="margin-top:0;" onclick="saveManualBlock('${v.id}')">Save</button>
+          ` : ''}
         </div>
   `;
+}
+
+function toggleManualBlockForm(vehicleId){
+  manualBlockDraft = manualBlockDraft === vehicleId ? null : vehicleId;
+  renderAdmin();
+}
+function saveManualBlock(vehicleId){
+  const v = VEHICLES.find(x => x.id === vehicleId);
+  if(!v) return;
+  const date = document.getElementById(`manual-block-date-${vehicleId}`).value;
+  const time = document.getElementById(`manual-block-time-${vehicleId}`).value;
+  if(!date || !time){ alert('Please choose both a date and a time.'); return; }
+  if(new Date(date + 'T' + time) <= new Date()){ alert('The "back" date/time must be in the future.'); return; }
+  v.manualBlockUntil = { date, time };
+  manualBlockDraft = null;
+  saveVehicles();
+  renderAdmin();
+}
+function clearManualBlock(vehicleId){
+  const v = VEHICLES.find(x => x.id === vehicleId);
+  if(!v) return;
+  v.manualBlockUntil = null;
+  saveVehicles();
+  renderAdmin();
 }
 
 function renderCustomersAdminHtml(){
@@ -5842,6 +5921,7 @@ function uploadPhoto(id, input){
 
 /* ============ ADMIN: ADD VEHICLE ============ */
 let newVehicleDraft = null;
+let manualBlockDraft = null; // vehicleId currently showing the "mark as rented" date/time form, or null
 let termsDraft = null; // null = not editing; string = draft text being edited
 
 function blankDraft(){
