@@ -3362,6 +3362,9 @@ async function subscribeAdminRealtime(){
         }
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_data', filter: 'key=eq.customers' }, (payload) => {
+        // Legacy path: kept only for any data still under the old single-blob 'customers'
+        // key from before customers moved to individual rows below. New signups no longer
+        // write here at all.
         const arr = payload && payload.new && payload.new.value;
         if(!Array.isArray(arr)) return;
         const existingIds = new Set(CUSTOMERS.map(c => c.id));
@@ -3372,6 +3375,25 @@ async function subscribeAdminRealtime(){
           freshOnes.forEach(notifyIfNewCustomer);
           if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
         }
+      })
+      // Real path for customers now that each one is its own row (key = 'customer_<id>')
+      // rather than one shared 'customers' blob: postgres_changes filters only support
+      // exact equality, not a prefix match, so this listens to every app_data change with
+      // no filter and checks the key itself -- a brand new customer arrives as an INSERT,
+      // not an UPDATE, so both event types matter here (DELETEs are left to a manual/
+      // periodic refresh, since Postgres doesn't reliably include the deleted row's data
+      // without extra replica-identity configuration this app doesn't control).
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'app_data' }, (payload) => {
+        if(payload.eventType === 'DELETE') return;
+        const key = payload.new && payload.new.key;
+        if(!key || !key.startsWith(CUSTOMER_ROW_PREFIX)) return;
+        const customer = payload.new.value;
+        if(!customer || !customer.id) return;
+        const isNew = !CUSTOMERS.some(c => c.id === customer.id);
+        CUSTOMERS = mergeById(CUSTOMERS, [customer], ['modifiedAt', 'createdAt']);
+        saveCustomerLocal(customer);
+        if(isNew) notifyIfNewCustomer(customer);
+        if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
       })
       .subscribe();
   }catch(e){ console.warn('Bike4u: could not subscribe to realtime admin notifications:', e); }
