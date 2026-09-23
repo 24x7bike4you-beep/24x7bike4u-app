@@ -640,6 +640,7 @@ function withTimeout(promise, ms, fallback){
    this is safe to ship immediately and simply starts working the moment the bucket exists,
    with nothing else to change on the code side. */
 const STORAGE_BUCKET = 'customer-photos';
+const DOCS_BUCKET = 'booking-documents'; // invoices and agreements -- separate bucket so its 30-day auto-cleanup (see cleanupOldBookingDocuments) never touches customer KYC photos
 function dataUrlToBlob(dataUrl){
   const parts = dataUrl.split(',');
   const mimeMatch = parts[0].match(/:(.*?);/);
@@ -649,19 +650,64 @@ function dataUrlToBlob(dataUrl){
   for(let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   return new Blob([arr], { type: mime });
 }
-async function uploadToStorage(path, blob){
+async function uploadToStorage(path, blob, bucket){
+  bucket = bucket || STORAGE_BUCKET;
   const client = await getSupabase();
   if(!client || !client.storage) return null;
   try{
     const result = await withTimeout(
-      client.storage.from(STORAGE_BUCKET).upload(path, blob, { upsert: true, contentType: blob.type || 'image/jpeg' }),
+      client.storage.from(bucket).upload(path, blob, { upsert: true, contentType: blob.type || 'image/jpeg' }),
       15000,
       { error: 'timeout' }
     );
-    if(result.error){ console.warn('Bike4u: storage upload failed for', path, '--', (result.error && result.error.message) || result.error); return null; }
-    const pub = client.storage.from(STORAGE_BUCKET).getPublicUrl(path);
+    if(result.error){ console.warn('Bike4u: storage upload failed for', bucket + '/' + path, '--', (result.error && result.error.message) || result.error); return null; }
+    const pub = client.storage.from(bucket).getPublicUrl(path);
     return (pub && pub.data && pub.data.publicUrl) || null;
-  }catch(e){ console.warn('Bike4u: storage upload error for', path, e); return null; }
+  }catch(e){ console.warn('Bike4u: storage upload error for', bucket + '/' + path, e); return null; }
+}
+async function deleteFromStorage(paths, bucket){
+  bucket = bucket || STORAGE_BUCKET;
+  if(!paths || !paths.length) return false;
+  const client = await getSupabase();
+  if(!client || !client.storage) return false;
+  try{
+    const result = await withTimeout(client.storage.from(bucket).remove(paths), 15000, { error: 'timeout' });
+    if(result.error){ console.warn('Bike4u: storage delete failed for', bucket, paths, '--', (result.error && result.error.message) || result.error); return false; }
+    return true;
+  }catch(e){ console.warn('Bike4u: storage delete error for', bucket, paths, e); return false; }
+}
+async function listStorageFolder(prefix, bucket){
+  bucket = bucket || STORAGE_BUCKET;
+  const client = await getSupabase();
+  if(!client || !client.storage) return null;
+  try{
+    const result = await withTimeout(client.storage.from(bucket).list(prefix, { limit: 100 }), 15000, { error: 'timeout' });
+    if(result.error) return null;
+    return result.data || [];
+  }catch(e){ return null; }
+}
+
+// Invoices and agreements are only ever needed for a little while after a booking --
+// housekeeping, not a permanent record -- so this quietly clears out anything older than
+// 30 days from the documents bucket (never touches customer KYC photos, a separate
+// bucket). Runs at most once a day, from an admin session only, so it never adds
+// meaningful load on its own.
+const DOC_CLEANUP_KEY = 'bike4u_last_doc_cleanup_v1';
+async function cleanupOldBookingDocuments(){
+  if(!state.isAdmin) return;
+  try{
+    const last = localStorage.getItem(DOC_CLEANUP_KEY);
+    if(last && (Date.now() - new Date(last).getTime()) < 24 * 3600 * 1000) return;
+  }catch(e){}
+  const cutoff = Date.now() - 30 * 24 * 3600 * 1000;
+  const oldBookings = BOOKINGS.filter(bk => new Date(bk.agreedAt || 0).getTime() < cutoff && new Date(bk.agreedAt || 0).getTime() > 0);
+  for(const bk of oldBookings){
+    const files = await listStorageFolder(bk.id, DOCS_BUCKET);
+    if(files && files.length){
+      await deleteFromStorage(files.map(f => `${bk.id}/${f.name}`), DOCS_BUCKET);
+    }
+  }
+  try{ localStorage.setItem(DOC_CLEANUP_KEY, new Date().toISOString()); }catch(e){}
 }
 // Swaps every embedded data-URL photo on a customer record for a lightweight storage URL,
 // in place. Fields that fail to upload (bucket missing, offline, etc.) are simply left as
@@ -1064,15 +1110,41 @@ function saveCustomers(specificCustomer){
   });
 }
 
-function deleteCustomer(id){
+// Deleting a customer now cascades fully: their linked bookings go too (and any
+// invoice/agreement files those bookings had in Storage), and their own uploaded photos
+// are removed from Storage as well -- otherwise those files would just sit there
+// unreferenced, quietly consuming storage forever with no way to find or clear them later.
+async function deleteCustomer(id){
   const c = CUSTOMERS.find(x => x.id === id);
   if(!c) return;
-  const hasBookings = BOOKINGS.some(bk => bk.customerId === id);
-  const warn = hasBookings ? ' This customer has existing bookings on record -- those bookings will NOT be deleted, but will no longer be linked to an active profile.' : '';
+  const linkedBookings = BOOKINGS.filter(bk => bk.customerId === id);
+  const warn = linkedBookings.length
+    ? ` This will also permanently delete ${linkedBookings.length} linked booking${linkedBookings.length===1?'':'s'} (and any saved invoice/agreement files for them).`
+    : '';
   if(!confirm(`Delete the profile for "${c.name || 'this customer'}"? This cannot be undone.${warn}`)) return;
+
   CUSTOMERS = CUSTOMERS.filter(x => x.id !== id);
   deleteCustomerLocal(id);
   sbDeleteCustomerRow(id);
+
+  // Clear this customer's uploaded KYC photos from Storage.
+  const photoFiles = await listStorageFolder(id, STORAGE_BUCKET);
+  if(photoFiles && photoFiles.length){
+    await deleteFromStorage(photoFiles.map(f => `${id}/${f.name}`), STORAGE_BUCKET);
+  }
+
+  // Cascade-delete every booking linked to this customer, and their document files too.
+  if(linkedBookings.length){
+    for(const bk of linkedBookings){
+      const docFiles = await listStorageFolder(bk.id, DOCS_BUCKET);
+      if(docFiles && docFiles.length){
+        await deleteFromStorage(docFiles.map(f => `${bk.id}/${f.name}`), DOCS_BUCKET);
+      }
+    }
+    BOOKINGS = BOOKINGS.filter(bk => bk.customerId !== id);
+    saveBookings();
+  }
+
   if(expandedCustomerId === id) expandedCustomerId = null;
   renderAdmin();
 }
@@ -1150,6 +1222,7 @@ function cancelBooking(id, cancelled){
   bk.cancelled = cancelled;
   bk.cancelledAt = cancelled ? new Date().toISOString() : null;
   bk.modifiedAt = new Date().toISOString();
+  if(cancelled) notifiedBookingCancelIds.add(bk.id); // this device made the change -- no need to notify itself when the realtime echo comes back
   saveBookings();
   renderAdmin();
 }
@@ -3188,6 +3261,8 @@ function requestAdminNotificationPermission(){
 // Tracks ids we've already alerted on, so the same booking/signup never notifies twice
 // (once from the tab that created it, once from the realtime echo of that same change).
 const notifiedBookingIds = new Set();
+const notifiedBookingCancelIds = new Set();
+const notifiedBookingExtendIds = new Set();
 const notifiedCustomerIds = new Set();
 
 function notifyAdmin(title, body, onClickGoTo){
@@ -3252,12 +3327,37 @@ async function subscribeAdminRealtime(){
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_data', filter: 'key=eq.bookings' }, (payload) => {
         const arr = payload && payload.new && payload.new.value;
         if(!Array.isArray(arr)) return;
-        const existingIds = new Set(BOOKINGS.map(b => b.id));
-        const freshOnes = arr.filter(b => !existingIds.has(b.id));
-        if(freshOnes.length){
+        const localById = new Map(BOOKINGS.map(b => [b.id, b]));
+        const freshOnes = arr.filter(b => !localById.has(b.id));
+        // Existing bookings that changed in a way worth a notification -- newly cancelled,
+        // or the drop-off date/time moved (an extension). This is what was missing before:
+        // the old check only ever looked for brand-new booking ids, so an edit to a
+        // booking that already existed on this device (a cancellation or extension made
+        // from elsewhere) never triggered anything here.
+        const changedOnes = arr.filter(b => {
+          const before = localById.get(b.id);
+          if(!before) return false;
+          const nowCancelled = b.cancelled && !before.cancelled;
+          const dropMoved = (b.dropDate !== before.dropDate || b.dropTime !== before.dropTime) && !b.cancelled;
+          return nowCancelled || dropMoved;
+        });
+        if(freshOnes.length || changedOnes.length){
           BOOKINGS = mergeById(BOOKINGS, arr, ['modifiedAt', 'agreedAt']);
           try{ localStorage.setItem(BOOKINGS_STORAGE_KEY, JSON.stringify(BOOKINGS)); }catch(e){}
           freshOnes.forEach(notifyIfNewBooking);
+          changedOnes.forEach(b => {
+            const before = localById.get(b.id);
+            if(b.cancelled && !before.cancelled){
+              if(notifiedBookingCancelIds.has(b.id)) return;
+              notifiedBookingCancelIds.add(b.id);
+              notifyAdmin('Booking cancelled', `${bookingDisplayNumber(b.id)} — ${b.vehicleName} for ${b.customerName} was cancelled.`, 'admin');
+            } else {
+              const extKey = b.id + '|' + b.dropDate + b.dropTime;
+              if(notifiedBookingExtendIds.has(extKey)) return;
+              notifiedBookingExtendIds.add(extKey);
+              notifyAdmin('Booking extended', `${bookingDisplayNumber(b.id)} — ${b.vehicleName} for ${b.customerName} extended to ${fmtDate(b.dropDate)}, ${fmtTime(b.dropTime)}.`, 'admin');
+            }
+          });
           if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
         }
       })
@@ -4034,7 +4134,7 @@ function toggleBookingExpand(id){
 }
 
 function blankNewBookingDraft(){
-  return { customerId: '', vehicleId: '', pickupDate: '', pickupTime: '10:00', dropDate: '', dropTime: '10:00', kmPackage: null, customKm: '', pickupCharge: 0, dropCharge: 0, helmetCharge: 0, discountType: 'flat', discountValue: 0, shareOnWhatsapp: true };
+  return { customerId: '', vehicleId: '', pickupDate: '', pickupTime: '10:00', dropDate: '', dropTime: '10:00', kmPackage: null, customKm: '', pickupCharge: 0, dropCharge: 0, helmetCharge: 0, discountType: 'flat', discountValue: 0, rentOverride: null, depositOverride: null, shareOnWhatsapp: true };
 }
 let newBookingDraft = null;
 let newBookingCustomerSearch = '';
@@ -4051,6 +4151,13 @@ function updateNewBookingDraftField(field, val){
   } else if(['pickupCharge','dropCharge','helmetCharge','discountValue'].includes(field)){
     const n = parseFloat(val);
     newBookingDraft[field] = isNaN(n) || n < 0 ? 0 : n;
+  } else if(field === 'rentOverride' || field === 'depositOverride'){
+    if(val === '' || val === null){
+      newBookingDraft[field] = null; // back to auto-calculated
+    } else {
+      const n = parseFloat(val);
+      newBookingDraft[field] = isNaN(n) || n < 0 ? 0 : n;
+    }
   } else if(field === 'discountType'){
     newBookingDraft[field] = val;
   } else {
@@ -4181,17 +4288,30 @@ function renderNewBookingFormHtml(){
           <input type="number" min="0" value="${d.discountValue}" onchange="updateNewBookingDraftField('discountValue', this.value)">
         </div>
       </div>
+      <p class="field-hint" style="margin-bottom:6px;">Rent &amp; deposit (auto-calculated, but editable per booking — e.g. for a negotiated rate) — leave blank to use the calculated value.</p>
+      <div class="field-row" style="margin-bottom:8px;">
+        <div class="field">
+          <label>Rental price (₹)${billing && billing.totalHours > 0 ? ` <span style="color:var(--text-faint);font-weight:500;">— calculated: ${money(billing.total)}</span>` : ''}</label>
+          <input type="number" min="0" placeholder="${billing && billing.totalHours > 0 ? Math.round(billing.total) : 'Auto'}" value="${d.rentOverride !== null ? d.rentOverride : ''}" onchange="updateNewBookingDraftField('rentOverride', this.value)">
+        </div>
+        <div class="field">
+          <label>Deposit (₹)${vehicle ? ` <span style="color:var(--text-faint);font-weight:500;">— default: ${money(vehicle.deposit)}</span>` : ''}</label>
+          <input type="number" min="0" placeholder="${vehicle ? Math.round(vehicle.deposit) : 'Auto'}" value="${d.depositOverride !== null ? d.depositOverride : ''}" onchange="updateNewBookingDraftField('depositOverride', this.value)">
+        </div>
+      </div>
       ${billing && billing.totalHours > 0 ? (() => {
           const extras = (d.pickupCharge||0) + (d.dropCharge||0) + (d.helmetCharge||0);
-          const discount = newBookingDiscountAmount(d, billing.total);
-          const grand = billing.total + extras - discount;
+          const rentBase = d.rentOverride !== null ? d.rentOverride : billing.total;
+          const deposit = d.depositOverride !== null ? d.depositOverride : vehicle.deposit;
+          const discount = newBookingDiscountAmount(d, rentBase);
+          const grand = rentBase + extras - discount;
           const extrasParts = [];
           if(d.pickupCharge) extrasParts.push(`Pickup ${money(d.pickupCharge)}`);
           if(d.dropCharge) extrasParts.push(`Drop-off ${money(d.dropCharge)}`);
           if(d.helmetCharge) extrasParts.push(`Helmet ${money(d.helmetCharge)}`);
           return `
       <div class="note-box" style="margin-bottom:8px;">
-        Duration: <strong>${durationLabel(billing.totalHours)}</strong> · Rent: <strong>${money(billing.total)}</strong>${extrasParts.length ? ` · ${extrasParts.join(' · ')}` : ''} · Deposit: <strong>${money(vehicle.deposit)}</strong> · Extra km: <strong>₹${vehicle.extraKm}/km</strong>
+        Duration: <strong>${durationLabel(billing.totalHours)}</strong> · Rent: <strong>${money(rentBase)}</strong>${d.rentOverride !== null ? ' <span style="color:var(--yellow);">(edited)</span>' : ''}${extrasParts.length ? ` · ${extrasParts.join(' · ')}` : ''} · Deposit: <strong>${money(deposit)}</strong>${d.depositOverride !== null ? ' <span style="color:var(--yellow);">(edited)</span>' : ''} · Extra km: <strong>₹${vehicle.extraKm}/km</strong>
         ${discount > 0 ? `<br>Discount: <strong style="color:var(--teal);">-${money(discount)}</strong>` : ''}
         <br><strong>Total rent + charges: ${money(grand)}</strong> (deposit collected and refunded separately)
       </div>`;
@@ -4228,7 +4348,9 @@ function saveNewBooking(){
   const effectiveKm = effectiveNewBookingKm(d);
   if(!effectiveKm){ showErr('Please enter a valid km figure.'); return; }
   const billing = billingFor(vehicle, d.pickupDate, d.pickupTime, d.dropDate, d.dropTime, effectiveKm);
-  const discountAmount = newBookingDiscountAmount(d, billing.total);
+  const rentBase = d.rentOverride !== null ? d.rentOverride : billing.total;
+  const deposit = d.depositOverride !== null ? d.depositOverride : vehicle.deposit;
+  const discountAmount = newBookingDiscountAmount(d, rentBase);
 
   const booking = {
     id: genId('BK'),
@@ -4244,14 +4366,16 @@ function saveNewBooking(){
     dropDate: d.dropDate, dropTime: d.dropTime,
     durationLabel: durationLabel(billing.totalHours),
     kmLabel: billing.isPureWeekly ? `${billing.includedKm} km included (700 km/week)` : `${effectiveKm} km${kmUnit(billing, effectiveKm)} · ${billing.includedKm} km included`,
-    rentalTotal: billing.total + (d.pickupCharge||0) + (d.dropCharge||0) + (d.helmetCharge||0) - discountAmount,
+    rentalTotal: rentBase + (d.pickupCharge||0) + (d.dropCharge||0) + (d.helmetCharge||0) - discountAmount,
     pickupCharge: d.pickupCharge || 0,
     dropCharge: d.dropCharge || 0,
     helmetCharge: d.helmetCharge || 0,
     discountType: discountAmount ? d.discountType : null,
     discountValue: discountAmount ? d.discountValue : 0,
     discountAmount: discountAmount,
-    deposit: vehicle.deposit,
+    priceEdited: d.rentOverride !== null,
+    deposit: deposit,
+    depositEdited: d.depositOverride !== null,
     extraKmCharge: vehicle.extraKm,
     paymentMethod: 'Cash / UPI / Card (collected at pickup/drop-off)',
     termsVersion: TERMS_VERSION,
@@ -4377,6 +4501,7 @@ function saveExtension(){
   bk.durationLabel = durationLabel(newHours);
   bk.rentalTotal = bk.rentalTotal + d.charge;
   bk.modifiedAt = new Date().toISOString();
+  notifiedBookingExtendIds.add(bk.id + '|' + bk.dropDate + bk.dropTime); // this device made the change -- no need to notify itself when the realtime echo comes back
   saveBookings();
 
   // In-app notification, same store the return/extension reminder buttons use.
@@ -5030,6 +5155,10 @@ function generateBookingAgreementPDF(id){
   doc.text(`Geo-tag location at time of booking: ${bk.customerGeo || 'Not recorded'}`, margin, y);
 
   doc.save(`Bike4u-Agreement-${bk.customerName.replace(/\s+/g,'_')}-${bookingDisplayNumber(bk.id)}.pdf`);
+  // Also keep a server copy (small, auto-deleted after 30 days -- see
+  // cleanupOldBookingDocuments) so it can be re-shared or looked up later without
+  // regenerating it, without accumulating storage indefinitely.
+  try{ uploadToStorage(`${bk.id}/agreement-${Date.now()}.pdf`, doc.output('blob'), DOCS_BUCKET); }catch(e){}
 }
 
 /* ============ INVOICES ============
@@ -5137,32 +5266,50 @@ function generateInvoicePDF(id, kind, extension){
 // Builds the invoice and hands it to WhatsApp -- via the phone's native share sheet
 // (one tap, file pre-attached) when available, otherwise downloads the PDF and opens a
 // WhatsApp chat with the customer so the admin can attach it themselves.
+// Delivering the invoice has two paths, tried in order:
+// 1. Hand the PDF straight to WhatsApp via the phone's native share sheet -- zero server
+//    storage used at all, since the file goes device-to-WhatsApp directly.
+// 2. If that's not available (desktop, unsupported browser), upload the small PDF to
+//    Supabase Storage and send a clickable link instead of the old "download it and hope
+//    you remember to attach it" flow -- far more reliable, and the file is tiny (an
+//    invoice is text, not a photo) and auto-deleted after 30 days (see
+//    cleanupOldBookingDocuments), so it never meaningfully adds to server storage either.
 function sendInvoiceOnWhatsapp(id, kind, extension){
-  ensureJsPDFThen(function(){
+  ensureJsPDFThen(async function(){
     const result = generateInvoicePDF(id, kind, extension);
     if(!result) return;
     const { doc, bk } = result;
     const filename = `Bike4u-Invoice-${bk.customerName.replace(/\s+/g,'_')}-${bookingDisplayNumber(bk.id)}${kind==='extension' ? '-ext' : ''}.pdf`;
     const waNum = (bk.customerMobile || '').replace(/\D/g, '');
-    const caption = kind === 'extension'
+    const baseCaption = kind === 'extension'
       ? `*24x7 Bike4U Bike Rentals*\nHere's your updated invoice after the extension on Booking ${bookingDisplayNumber(bk.id)}.\nNew total: ${money(bk.rentalTotal)}`
       : `*24x7 Bike4U Bike Rentals*\nHere's your invoice for Booking ${bookingDisplayNumber(bk.id)}.\nTotal: ${money(bk.rentalTotal)}`;
 
+    // Keep a small server copy either way (auto-deleted after 30 days -- see
+    // cleanupOldBookingDocuments), independent of which WhatsApp delivery path is used
+    // below, so it can be looked up or re-sent later without regenerating it.
+    const pdfBlob = doc.output('blob');
+    const path = `${bk.id}/invoice-${kind}-${Date.now()}.pdf`;
+    const storedUrlPromise = uploadToStorage(path, pdfBlob, DOCS_BUCKET);
+
     let shared = false;
     try{
-      const blob = doc.output('blob');
-      const file = new File([blob], filename, { type: 'application/pdf' });
+      const file = new File([pdfBlob], filename, { type: 'application/pdf' });
       if(navigator.canShare && navigator.canShare({ files: [file] })){
-        navigator.share({ files: [file], title: filename, text: caption }).catch(() => {});
+        await navigator.share({ files: [file], title: filename, text: baseCaption }).catch(() => {});
         shared = true;
       }
-    }catch(e){ /* Web Share API with files not supported here -- fall through */ }
+    }catch(e){ /* Web Share API with files not supported here -- fall through to the link */ }
+    if(shared) return;
 
-    if(!shared){
+    const url = await storedUrlPromise;
+    if(url){
+      const caption = `${baseCaption}\n\nView/download your invoice: ${url}`;
+      if(waNum) window.open(`https://wa.me/91${waNum}?text=${encodeURIComponent(caption)}`, '_blank');
+    } else {
+      // Storage isn't set up/reachable -- fall back to downloading it locally so nothing is lost.
       doc.save(filename);
-      if(waNum){
-        window.open(`https://wa.me/91${waNum}?text=${encodeURIComponent(caption + '\n\n(Invoice PDF just downloaded on this device -- attach it here to send.)')}`, '_blank');
-      }
+      if(waNum) window.open(`https://wa.me/91${waNum}?text=${encodeURIComponent(baseCaption + '\n\n(Invoice PDF just downloaded on this device -- attach it here to send.)')}`, '_blank');
     }
   });
 }
@@ -5841,6 +5988,7 @@ function restartTour(){
   render();
   syncFromSupabase();
   resumePendingSyncs(); // picks up any signup/booking that failed to reach the cloud in a previous session on this device, and quietly finishes the job
+  cleanupOldBookingDocuments(); // quietly clears out invoices/agreements older than 30 days, admin sessions only, at most once a day
   applySavedTheme();
   maybeStartHomeTour();
 })();
