@@ -3317,6 +3317,18 @@ function checkOverdueBookings(){
 // notification here. Requires realtime to be enabled for the 'app_data' table in the
 // Supabase dashboard (Database -> Replication).
 let adminRealtimeChannel = null;
+// Tracks whether this device's live connection is actually up -- 'connecting' until the
+// first status callback, then 'live' or 'down'. This exists because a broken/never-
+// established connection fails *silently* by design (no error, it just never receives
+// anything), which is exactly what made "some devices see updates, others don't" so hard
+// to diagnose -- there was no way to tell the two situations apart before now. A
+// background/inactive browser tab is the most common reason a laptop's connection quietly
+// drops while a phone (usually the foreground, actively-used tab) stays connected.
+let realtimeStatus = 'connecting';
+function realtimeStatusLabel(){
+  return realtimeStatus === 'live' ? '🟢 Live sync' : realtimeStatus === 'down' ? '🔴 Not connected — tap Refresh, or reload this tab' : '🟡 Connecting…';
+}
+
 async function subscribeAdminRealtime(){
   if(adminRealtimeChannel) return;
   const client = await getSupabase();
@@ -3395,8 +3407,38 @@ async function subscribeAdminRealtime(){
         if(isNew) notifyIfNewCustomer(customer);
         if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
       })
-      .subscribe();
-  }catch(e){ console.warn('Bike4u: could not subscribe to realtime admin notifications:', e); }
+      .subscribe((status) => {
+        // SUBSCRIBED = genuinely connected and receiving live updates right now.
+        // CLOSED/CHANNEL_ERROR/TIMED_OUT = not connected -- most often a background tab
+        // whose connection dropped, or (less commonly) Realtime not yet enabled for the
+        // app_data table in the Supabase dashboard (Database -> Replication).
+        realtimeStatus = status === 'SUBSCRIBED' ? 'live' : 'down';
+        if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
+      });
+  }catch(e){ console.warn('Bike4u: could not subscribe to realtime admin notifications:', e); realtimeStatus = 'down'; }
+}
+
+// Safety net for exactly the situation that keeps coming up: a device whose live
+// connection has gone quiet (most often a laptop tab left in the background) with no
+// periodic poll to fall back on. Rather than reintroducing a blind timer for everyone
+// (which was deliberately removed), this only ever syncs when the live connection is
+// confirmed *not* live on this specific device -- so a properly-connected device does
+// nothing extra, exactly as before, and only a stale one quietly catches itself up.
+function startRealtimeFallbackWatchdog(){
+  setInterval(() => {
+    if(!state.isAdmin) return;
+    if(realtimeStatus !== 'live'){
+      syncFromSupabase(); // catch up on anything missed while not connected
+      // Also try to re-establish the live connection itself, not just patch over its
+      // absence forever -- a dropped connection can often reconnect cleanly once a
+      // background tab becomes active again or a network blip passes.
+      if(adminRealtimeChannel){
+        try{ adminRealtimeChannel.unsubscribe(); }catch(e){}
+        adminRealtimeChannel = null;
+      }
+      subscribeAdminRealtime();
+    }
+  }, 45000);
 }
 
 /* ============ CUSTOMER-SIDE: return reminders / extension notifications ============
@@ -3502,6 +3544,7 @@ function renderAdmin(){
           ${state.adminTab === 'bookings' ? `<button class="btn-ghost" onclick="toggleNewBookingForm()">${newBookingDraft ? 'Cancel' : '+ New booking'}</button>` : ''}
           ${state.adminTab === 'coupons' ? `<button class="btn-ghost" onclick="toggleNewCouponForm()">${newCouponDraft ? 'Cancel' : '+ New coupon'}</button>` : ''}
           ${state.adminTab === 'dashboard' ? `<button class="btn-ghost" onclick="downloadIncomeReportPDF()">⬇ Download PDF</button>` : ''}
+          <span class="field-hint" style="align-self:center;white-space:nowrap;" title="Whether this device is currently receiving live updates from other devices">${realtimeStatusLabel()}</span>
           <button class="btn-ghost" onclick="adminLogout()">Log out</button>
         </div>
       </div>
@@ -6010,6 +6053,19 @@ function restartTour(){
   render();
   syncFromSupabase();
   resumePendingSyncs(); // picks up any signup/booking that failed to reach the cloud in a previous session on this device, and quietly finishes the job
+  startRealtimeFallbackWatchdog();
+  // Catch up immediately when this tab becomes active again, rather than waiting for the
+  // watchdog's next tick -- covers the common case of a laptop tab that was in the
+  // background (and likely had its live connection quietly dropped) being switched back to.
+  document.addEventListener('visibilitychange', () => {
+    if(document.visibilityState === 'visible' && state.isAdmin){
+      syncFromSupabase();
+      if(realtimeStatus !== 'live'){
+        if(adminRealtimeChannel){ try{ adminRealtimeChannel.unsubscribe(); }catch(e){} adminRealtimeChannel = null; }
+        subscribeAdminRealtime();
+      }
+    }
+  });
   cleanupOldBookingDocuments(); // quietly clears out invoices/agreements older than 30 days, admin sessions only, at most once a day
   applySavedTheme();
   maybeStartHomeTour();
