@@ -785,14 +785,36 @@ function mergeById(local, remote, tsFields){
   return Array.from(byId.values());
 }
 
+let lastSyncAt = 0;
+function syncIfStale(maxAgeMs){
+  if(Date.now() - lastSyncAt <= (maxAgeMs || 90000)) return;
+  if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()){
+    silentRefresh(syncFromSupabase);
+  } else {
+    syncFromSupabase();
+  }
+}
+
 async function syncFromSupabase(){
+  lastSyncAt = Date.now();
   const [remoteVehicles, remoteCustomerRows, remoteCustomersLegacy, remoteBookings, remoteNotifications, remotePaymentSettings, remoteTerms] = await Promise.all([
     sbGet('vehicles'), sbGetAllCustomerRows(), sbGet('customers'), sbGet('bookings'), sbGet('notifications'), sbGet('paymentSettings'), sbGet('terms')
   ]);
 
-  if(Array.isArray(remoteVehicles) && remoteVehicles.length){
-    VEHICLES = remoteVehicles;
-    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(VEHICLES)); }catch(e){}
+  // Vehicles are still one shared record (never migrated to individual rows like
+  // customers), which is exactly what let one device's stale copy silently overwrite
+  // another device's fresher photo/edit before this fix -- merged by id now instead of
+  // wholesale replaced, same protection bookings/customers already had, using each
+  // vehicle's own modifiedAt (stamped by saveVehicles above) to decide which side is
+  // actually newer when the same vehicle differs on both sides.
+  if(Array.isArray(remoteVehicles) && (remoteVehicles.length || VEHICLES.length === 0)){
+    const merged = mergeById(VEHICLES, remoteVehicles, ['modifiedAt']);
+    const localHadExtra = merged.length > remoteVehicles.length || merged.some(v => {
+      const r = remoteVehicles.find(rv => rv.id === v.id);
+      return r && JSON.stringify(r) !== JSON.stringify(v);
+    });
+    VEHICLES = merged;
+    if(localHadExtra) sbSet('vehicles', VEHICLES); // this device had a vehicle (or a newer edit to one) the cloud didn't yet -- push the merged list back up so it catches up
   } else {
     sbSet('vehicles', VEHICLES);
   }
@@ -823,7 +845,6 @@ async function syncFromSupabase(){
     const merged = mergeById(BOOKINGS, remoteBookings, ['modifiedAt', 'agreedAt']);
     const localHadExtra = merged.length > remoteBookings.length;
     BOOKINGS = merged;
-    try{ localStorage.setItem(BOOKINGS_STORAGE_KEY, JSON.stringify(BOOKINGS)); }catch(e){}
     if(localHadExtra) sbSet('bookings', BOOKINGS);
   } else {
     sbSet('bookings', BOOKINGS);
@@ -831,7 +852,6 @@ async function syncFromSupabase(){
 
   if(Array.isArray(remoteNotifications) && (remoteNotifications.length || NOTIFICATIONS.length === 0)){
     NOTIFICATIONS = remoteNotifications;
-    try{ localStorage.setItem(NOTIFICATIONS_STORAGE_KEY, JSON.stringify(NOTIFICATIONS)); }catch(e){}
   } else {
     sbSet('notifications', NOTIFICATIONS);
   }
@@ -839,14 +859,12 @@ async function syncFromSupabase(){
   const remoteCoupons = await sbGet('coupons');
   if(Array.isArray(remoteCoupons) && (remoteCoupons.length || COUPONS.length === 0)){
     COUPONS = remoteCoupons;
-    try{ localStorage.setItem(COUPONS_STORAGE_KEY, JSON.stringify(COUPONS)); }catch(e){}
   } else {
     sbSet('coupons', COUPONS);
   }
 
   if(remotePaymentSettings && typeof remotePaymentSettings === 'object'){
     PAYMENT_SETTINGS = Object.assign({}, DEFAULT_PAYMENT_SETTINGS, remotePaymentSettings);
-    try{ localStorage.setItem(PAYMENT_SETTINGS_KEY, JSON.stringify(PAYMENT_SETTINGS)); }catch(e){}
   } else {
     sbSet('paymentSettings', PAYMENT_SETTINGS);
   }
@@ -854,7 +872,6 @@ async function syncFromSupabase(){
   if(remoteTerms && typeof remoteTerms === 'object' && remoteTerms.text){
     TERMS_TEXT = remoteTerms.text;
     TERMS_VERSION = remoteTerms.version || TERMS_VERSION;
-    try{ localStorage.setItem(TERMS_STORAGE_KEY, JSON.stringify(remoteTerms)); }catch(e){}
   } else {
     sbSet('terms', { text: TERMS_TEXT, version: TERMS_VERSION });
   }
@@ -866,27 +883,15 @@ async function syncFromSupabase(){
 /* ============ PERSISTENCE (fleet data cached in this browser, synced via Supabase) ============ */
 const STORAGE_KEY = 'bike4u_fleet_v1';
 
+// Supabase is the only source of truth now -- no local cache to seed from, so this just
+// hands back the built-in defaults to render immediately while the real fetch is in
+// flight (see syncFromSupabase, called right after init).
 function loadVehicles(){
-  try{
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if(saved){
-      const parsed = JSON.parse(saved);
-      if(Array.isArray(parsed) && parsed.length) return parsed;
-    }
-  }catch(e){
-    console.warn('Could not load saved fleet data:', e);
-  }
-  // No valid saved data yet -- start from the built-in defaults (deep copy so we never mutate DEFAULT_VEHICLES).
   return JSON.parse(JSON.stringify(DEFAULT_VEHICLES));
 }
 
-function saveVehicles(){
-  try{
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(VEHICLES));
-  }catch(e){
-    console.warn('Could not save fleet data:', e);
-    alert('Could not save your changes. Your browser storage may be full -- this usually happens when several vehicle photos are large. Try using smaller/compressed images.');
-  }
+function saveVehicles(specificVehicle){
+  if(specificVehicle) specificVehicle.modifiedAt = new Date().toISOString();
   sbSet('vehicles', VEHICLES);
 }
 
@@ -1020,62 +1025,14 @@ async function sbDeleteCustomerRow(id){
 // with a lightweight index of ids so the full list can still be reconstructed for reading.
 const CUSTOMER_LOCAL_PREFIX = 'bike4u_customer_';
 const CUSTOMERS_INDEX_KEY = 'bike4u_customers_index_v1';
-function saveCustomerLocal(customer){
-  try{
-    localStorage.setItem(CUSTOMER_LOCAL_PREFIX + customer.id, JSON.stringify(stripPhotosForLocalStorage(customer)));
-    let ids = [];
-    try{ ids = JSON.parse(localStorage.getItem(CUSTOMERS_INDEX_KEY) || '[]'); }catch(e){}
-    if(!ids.includes(customer.id)){
-      ids.push(customer.id);
-      localStorage.setItem(CUSTOMERS_INDEX_KEY, JSON.stringify(ids));
-    }
-    return true;
-  }catch(e){ console.warn('Could not save customer locally:', customer.id, e); return false; }
-}
-function saveAllCustomersLocal(){
-  const ids = [];
-  let allOk = true;
-  CUSTOMERS.forEach(c => {
-    ids.push(c.id);
-    if(!saveCustomerLocal(c)) allOk = false;
-  });
-  try{ localStorage.setItem(CUSTOMERS_INDEX_KEY, JSON.stringify(ids)); }catch(e){ allOk = false; }
-  return allOk;
-}
-function deleteCustomerLocal(id){
-  try{
-    localStorage.removeItem(CUSTOMER_LOCAL_PREFIX + id);
-    let ids = [];
-    try{ ids = JSON.parse(localStorage.getItem(CUSTOMERS_INDEX_KEY) || '[]'); }catch(e){}
-    localStorage.setItem(CUSTOMERS_INDEX_KEY, JSON.stringify(ids.filter(x => x !== id)));
-  }catch(e){}
-}
+// No-ops now that Supabase is the only place customer data is kept -- signatures kept
+// as-is so every existing call site (saveCustomers, the realtime handler, etc.) keeps
+// working unchanged; they just no longer do anything to this browser's storage.
+function saveCustomerLocal(customer){ return true; }
+function saveAllCustomersLocal(){ return true; }
+function deleteCustomerLocal(id){}
 
 function loadCustomers(){
-  try{
-    const idxRaw = localStorage.getItem(CUSTOMERS_INDEX_KEY);
-    if(idxRaw){
-      const ids = JSON.parse(idxRaw);
-      if(Array.isArray(ids)){
-        const list = [];
-        ids.forEach(id => {
-          try{
-            const raw = localStorage.getItem(CUSTOMER_LOCAL_PREFIX + id);
-            if(raw) list.push(JSON.parse(raw));
-          }catch(e){}
-        });
-        return list;
-      }
-    }
-    // Migrate anything still under the old single-blob key from before this change.
-    const legacy = localStorage.getItem(CUSTOMERS_STORAGE_KEY);
-    if(legacy){
-      const parsed = JSON.parse(legacy);
-      if(Array.isArray(parsed)) return parsed;
-    }
-  }catch(e){
-    console.warn('Could not load saved customers:', e);
-  }
   return [];
 }
 
@@ -1084,15 +1041,6 @@ function loadCustomers(){
 // independent of everyone else's data. Only bulk actions (a full resync, the retry queue
 // catching up) omit it and push every customer as their own row.
 function saveCustomers(specificCustomer){
-  const localOk = specificCustomer ? saveCustomerLocal(specificCustomer) : saveAllCustomersLocal();
-  if(!localOk){
-    console.warn('Could not save customer data locally (this browser\'s storage may be full).');
-    // Not fatal any more -- each customer's local entry is small on its own, so this now
-    // only happens if this specific device's *total* accumulated storage is genuinely
-    // full, not because of any one customer's photos. The cloud save below still proceeds
-    // either way, so the signup itself isn't blocked by this device's local cache being full.
-    alert("This device's browser storage is quite full, so your details couldn't be cached here for offline use -- but your profile will still be saved to our server normally. If you keep seeing this, try clearing some site data on this device.");
-  }
   setPendingSync('customers', true);
   const pushFn = specificCustomer ? () => sbSetOneCustomer(specificCustomer) : pushAllCustomerRows;
   return pushFn().then(ok => {
@@ -1155,25 +1103,10 @@ let CUSTOMERS = loadCustomers();
 const BOOKINGS_STORAGE_KEY = 'bike4u_bookings_v1';
 
 function loadBookings(){
-  try{
-    const saved = localStorage.getItem(BOOKINGS_STORAGE_KEY);
-    if(saved){
-      const parsed = JSON.parse(saved);
-      if(Array.isArray(parsed)) return parsed;
-    }
-  }catch(e){
-    console.warn('Could not load saved bookings:', e);
-  }
   return [];
 }
 
 function saveBookings(){
-  try{
-    localStorage.setItem(BOOKINGS_STORAGE_KEY, JSON.stringify(BOOKINGS));
-  }catch(e){
-    console.warn('Could not save booking data:', e);
-    alert('Could not save your booking agreement. Your browser storage may be full.');
-  }
   setPendingSync('bookings', true);
   return sbSet('bookings', BOOKINGS).then(ok => {
     lastSyncOk.bookings = ok;
@@ -1233,24 +1166,10 @@ let BOOKINGS = loadBookings();
 const COUPONS_STORAGE_KEY = 'bike4u_coupons_v1';
 
 function loadCoupons(){
-  try{
-    const saved = localStorage.getItem(COUPONS_STORAGE_KEY);
-    if(saved){
-      const parsed = JSON.parse(saved);
-      if(Array.isArray(parsed)) return parsed;
-    }
-  }catch(e){
-    console.warn('Could not load saved coupons:', e);
-  }
   return [];
 }
 
 function saveCoupons(){
-  try{
-    localStorage.setItem(COUPONS_STORAGE_KEY, JSON.stringify(COUPONS));
-  }catch(e){
-    console.warn('Could not save coupon data:', e);
-  }
   sbSet('coupons', COUPONS);
 }
 
@@ -1324,24 +1243,10 @@ function validateCoupon(codeRaw, rentAmount){
 const NOTIFICATIONS_STORAGE_KEY = 'bike4u_notifications_v1';
 
 function loadNotifications(){
-  try{
-    const saved = localStorage.getItem(NOTIFICATIONS_STORAGE_KEY);
-    if(saved){
-      const parsed = JSON.parse(saved);
-      if(Array.isArray(parsed)) return parsed;
-    }
-  }catch(e){
-    console.warn('Could not load saved notifications:', e);
-  }
   return [];
 }
 
 function saveNotifications(){
-  try{
-    localStorage.setItem(NOTIFICATIONS_STORAGE_KEY, JSON.stringify(NOTIFICATIONS));
-  }catch(e){
-    console.warn('Could not save notifications:', e);
-  }
   sbSet('notifications', NOTIFICATIONS);
 }
 
@@ -1358,18 +1263,10 @@ const DEFAULT_PAYMENT_SETTINGS = {
 };
 
 function loadPaymentSettings(){
-  try{
-    const saved = localStorage.getItem(PAYMENT_SETTINGS_KEY);
-    if(saved){
-      const parsed = JSON.parse(saved);
-      if(parsed && typeof parsed === 'object') return Object.assign({}, DEFAULT_PAYMENT_SETTINGS, parsed);
-    }
-  }catch(e){ console.warn('Could not load payment settings:', e); }
   return Object.assign({}, DEFAULT_PAYMENT_SETTINGS);
 }
 
 function savePaymentSettings(){
-  try{ localStorage.setItem(PAYMENT_SETTINGS_KEY, JSON.stringify(PAYMENT_SETTINGS)); }catch(e){ console.warn('Could not save payment settings:', e); }
   sbSet('paymentSettings', PAYMENT_SETTINGS);
 }
 
@@ -1379,22 +1276,13 @@ let PAYMENT_SETTINGS = loadPaymentSettings();
 const TERMS_STORAGE_KEY = 'bike4u_terms_v1';
 
 function loadTerms(){
-  try{
-    const saved = localStorage.getItem(TERMS_STORAGE_KEY);
-    if(saved){
-      const parsed = JSON.parse(saved);
-      if(parsed && typeof parsed === 'object' && parsed.text){
-        TERMS_TEXT = parsed.text;
-        TERMS_VERSION = parsed.version || TERMS_VERSION;
-      }
-    }
-  }catch(e){ console.warn('Could not load terms:', e); }
+  // Supabase-only now -- TERMS_TEXT/TERMS_VERSION just keep their built-in defaults until
+  // syncFromSupabase pulls the real values shortly after load.
 }
 loadTerms();
 
 function saveTerms(){
   const payload = { text: TERMS_TEXT, version: TERMS_VERSION };
-  try{ localStorage.setItem(TERMS_STORAGE_KEY, JSON.stringify(payload)); }catch(e){ console.warn('Could not save terms:', e); }
   sbSet('terms', payload);
 }
 
@@ -1731,21 +1619,28 @@ function applyAnimGuard(){
 // to invisible first means that reflow work happens while nothing is shown, then fading
 // back in only once the new content is already laid out, so the swap itself is masked
 // rather than merely un-animated.
+// Works with both sync render functions (render, renderCustomerAccount) and async ones
+// (syncFromSupabase, which does network fetches before its own internal render() call at
+// the very end) -- awaiting fn() here means the "fade back in" only happens once
+// everything fn does, sync or async, has actually finished, so the swap stays fully
+// masked the whole time rather than fading back in before an async fn's real content
+// update has even happened.
 function silentRefresh(fn){
   const appEl = document.getElementById('app');
-  const doRender = () => {
+  const run = async () => {
     silentRefreshFlag = true;
     applyAnimGuard();
-    try{ fn(); } finally { silentRefreshFlag = false; }
+    try{ await fn(); } finally { silentRefreshFlag = false; }
   };
-  if(!appEl){ doRender(); return; }
+  if(!appEl){ run(); return; }
   appEl.style.transition = 'opacity .18s ease';
   appEl.style.opacity = '0';
   setTimeout(() => {
-    doRender();
-    requestAnimationFrame(() => {
-      const el = document.getElementById('app'); // doRender() replaced the node's contents, not the node itself
-      if(el) el.style.opacity = '1';
+    run().then(() => {
+      requestAnimationFrame(() => {
+        const el = document.getElementById('app'); // run() may have replaced the node's contents, not the node itself
+        if(el) el.style.opacity = '1';
+      });
     });
   }, 190);
 }
@@ -2416,32 +2311,18 @@ function stripPhotosForLocalStorage(obj){
   return copy;
 }
 
-// Auto-saves signup progress to this browser so a refresh, accidental tab close, or lost
-// connection mid-signup doesn't make the customer start over -- especially painful given
-// how much they type and how many documents they upload on this form.
-const CUSTOMER_DRAFT_KEY = 'bike4u_customer_draft_v1';
+// This used to auto-save signup-in-progress to the browser (so a refresh didn't lose it)
+// -- now purely in-memory only, per "no local storage" -- a page refresh mid-signup does
+// mean starting over, since Supabase has nothing to save until the profile is actually
+// submitted at the end.
 function loadCustomerDraft(){
-  try{
-    const saved = localStorage.getItem(CUSTOMER_DRAFT_KEY);
-    if(saved){
-      const parsed = JSON.parse(saved);
-      if(parsed && typeof parsed === 'object') return Object.assign(blankCustomerDraft(), parsed);
-    }
-  }catch(e){
-    console.warn('Could not load saved signup draft:', e);
-  }
   return blankCustomerDraft();
 }
 function saveCustomerDraft(){
-  try{
-    localStorage.setItem(CUSTOMER_DRAFT_KEY, JSON.stringify(stripPhotosForLocalStorage(customerDraft)));
-  }catch(e){
-    console.warn('Could not auto-save signup progress (storage may be full):', e);
-  }
+  // No-op -- kept so every existing call site (each keystroke/photo upload) still works unchanged.
 }
 function resetCustomerDraft(){
   customerDraft = blankCustomerDraft();
-  try{ localStorage.removeItem(CUSTOMER_DRAFT_KEY); }catch(e){}
 }
 let customerDraft = loadCustomerDraft();
 
@@ -3362,6 +3243,47 @@ function realtimeStatusLabel(){
   return realtimeStatus === 'live' ? '🟢 Live sync' : realtimeStatus === 'down' ? '🔴 Not connected — tap Refresh, or reload this tab' : '🟡 Connecting…';
 }
 
+// A concrete, one-tap answer to "is Supabase actually working" instead of having to
+// infer it from whether data looks right -- writes a small throwaway test record, reads
+// it back, deletes it again, and reports each step plus whether the live connection is up,
+// rather than just trusting the app's normal behavior at face value.
+async function testSupabaseConnection(btn){
+  if(btn){ btn.disabled = true; btn.textContent = 'Testing…'; }
+  const results = [];
+  const testKey = 'connection_test_' + Date.now();
+  const testValue = { testedAt: new Date().toISOString(), device: (navigator.userAgent || '').slice(0, 70) };
+
+  const client = await getSupabase();
+  results.push({ step: 'Supabase library loaded & connected', ok: !!client });
+
+  if(client){
+    const writeOk = await sbSet(testKey, testValue);
+    results.push({ step: 'Write a test record', ok: writeOk });
+
+    const readBack = await sbGet(testKey);
+    const readOk = !!(readBack && readBack.testedAt === testValue.testedAt);
+    results.push({ step: 'Read it back correctly', ok: readOk });
+
+    let deleteOk = false;
+    try{
+      const r = await withTimeout(client.from('app_data').delete().eq('key', testKey), 10000, { error: 'timeout' });
+      deleteOk = !r.error;
+    }catch(e){}
+    results.push({ step: 'Delete the test record (cleanup)', ok: deleteOk });
+  }
+
+  results.push({
+    step: 'Live real-time connection',
+    ok: realtimeStatus === 'live',
+    note: realtimeStatus !== 'live' ? 'Not connected right now -- this can take a few seconds after opening the app, or may mean Realtime needs enabling for the app_data table in Supabase (Database > Replication)' : ''
+  });
+
+  if(btn){ btn.disabled = false; btn.textContent = '🧪 Test connection'; }
+  const allOk = results.every(r => r.ok);
+  const lines = results.map(r => `${r.ok ? '✅' : '❌'} ${r.step}${!r.ok && r.note ? '\n   ' + r.note : ''}`).join('\n');
+  alert((allOk ? '✅ All checks passed -- Supabase is working correctly on this device.\n\n' : '⚠ Some checks failed on this device:\n\n') + lines);
+}
+
 async function subscribeAdminRealtime(){
   if(adminRealtimeChannel) return;
   const client = await getSupabase();
@@ -3369,6 +3291,12 @@ async function subscribeAdminRealtime(){
   try{
     adminRealtimeChannel = client
       .channel('admin-notifications')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_data', filter: 'key=eq.vehicles' }, (payload) => {
+        const arr = payload && payload.new && payload.new.value;
+        if(!Array.isArray(arr)) return;
+        VEHICLES = mergeById(VEHICLES, arr, ['modifiedAt']);
+            if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
+      })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_data', filter: 'key=eq.bookings' }, (payload) => {
         const arr = payload && payload.new && payload.new.value;
         if(!Array.isArray(arr)) return;
@@ -3388,7 +3316,6 @@ async function subscribeAdminRealtime(){
         });
         if(freshOnes.length || changedOnes.length){
           BOOKINGS = mergeById(BOOKINGS, arr, ['modifiedAt', 'agreedAt']);
-          try{ localStorage.setItem(BOOKINGS_STORAGE_KEY, JSON.stringify(BOOKINGS)); }catch(e){}
           freshOnes.forEach(notifyIfNewBooking);
           changedOnes.forEach(b => {
             const before = localById.get(b.id);
@@ -3461,7 +3388,9 @@ function startRealtimeFallbackWatchdog(){
   setInterval(() => {
     if(!state.isAdmin) return;
     if(realtimeStatus !== 'live'){
-      syncFromSupabase(); // catch up on anything missed while not connected
+      // Catch up on anything missed while not connected -- wrapped so this can never
+      // cause a visible flicker if it happens to run while someone's looking at the screen.
+      if(state.page === 'admin' && !userIsActivelyEditing()){ silentRefresh(syncFromSupabase); } else { syncFromSupabase(); }
       // Also try to re-establish the live connection itself, not just patch over its
       // absence forever -- a dropped connection can often reconnect cleanly once a
       // background tab becomes active again or a network blip passes.
@@ -3531,7 +3460,6 @@ async function subscribeCustomerRealtime(){
         const existingIds = new Set(NOTIFICATIONS.map(n => n.id));
         const freshOnes = arr.filter(n => !existingIds.has(n.id));
         NOTIFICATIONS = arr;
-        try{ localStorage.setItem(NOTIFICATIONS_STORAGE_KEY, JSON.stringify(NOTIFICATIONS)); }catch(e){}
         freshOnes.forEach(notifyIfNewForCustomer);
         if(state.currentCustomer && state.page === 'customer-account' && !userIsActivelyEditing()) silentRefresh(renderCustomerAccount);
       })
@@ -3577,6 +3505,7 @@ function renderAdmin(){
           ${state.adminTab === 'bookings' ? `<button class="btn-ghost" onclick="toggleNewBookingForm()">${newBookingDraft ? 'Cancel' : '+ New booking'}</button>` : ''}
           ${state.adminTab === 'coupons' ? `<button class="btn-ghost" onclick="toggleNewCouponForm()">${newCouponDraft ? 'Cancel' : '+ New coupon'}</button>` : ''}
           ${state.adminTab === 'dashboard' ? `<button class="btn-ghost" onclick="downloadIncomeReportPDF()">⬇ Download PDF</button>` : ''}
+          <button class="btn-ghost" id="test-supabase-btn" onclick="testSupabaseConnection(this)">🧪 Test connection</button>
           <span class="field-hint" style="align-self:center;white-space:nowrap;" title="Whether this device is currently receiving live updates from other devices">${realtimeStatusLabel()}</span>
           <button class="btn-ghost" onclick="adminLogout()">Log out</button>
         </div>
@@ -3832,14 +3761,14 @@ function saveManualBlock(vehicleId){
   if(new Date(date + 'T' + time) <= new Date()){ alert('The "back" date/time must be in the future.'); return; }
   v.manualBlockUntil = { date, time };
   manualBlockDraft = null;
-  saveVehicles();
+  saveVehicles(v);
   renderAdmin();
 }
 function clearManualBlock(vehicleId){
   const v = VEHICLES.find(x => x.id === vehicleId);
   if(!v) return;
   v.manualBlockUntil = null;
-  saveVehicles();
+  saveVehicles(v);
   renderAdmin();
 }
 
@@ -5461,6 +5390,11 @@ function sendInvoiceOnWhatsapp(id, kind, extension){
 function setAdminTab(tab){
   state.adminTab = tab;
   if(tab === 'vehicles') checkOverdueBookings(); // catch any vehicle that's become free purely because time passed since this was last open
+  // Switching tabs is a reliable moment to catch up on anything missed -- unlike a
+  // background timer, which browsers routinely throttle or pause entirely in a tab
+  // that's been sitting unused for a while, this only depends on the admin actually
+  // using the app, which is a much safer thing to rely on.
+  syncIfStale();
   renderAdmin();
 }
 
@@ -5888,23 +5822,23 @@ function generateCustomerPDF(id){
 function updateRate(id, km, val){
   const v = VEHICLES.find(x => x.id === id);
   const n = parseFloat(val);
-  if(!isNaN(n) && n >= 0){ v.rate[km] = n; saveVehicles(); }
+  if(!isNaN(n) && n >= 0){ v.rate[km] = n; saveVehicles(v); }
 }
 function updateField(id, field, val){
   const v = VEHICLES.find(x => x.id === id);
   const n = parseFloat(val);
-  if(!isNaN(n) && n >= 0){ v[field] = n; saveVehicles(); }
+  if(!isNaN(n) && n >= 0){ v[field] = n; saveVehicles(v); }
 }
 function toggleHidden(id){
   const v = VEHICLES.find(x => x.id === id);
   v.hidden = !v.hidden;
-  saveVehicles();
+  saveVehicles(v);
   renderAdmin();
 }
 function toggleSoldOut(id){
   const v = VEHICLES.find(x => x.id === id);
   v.soldOut = !v.soldOut;
-  saveVehicles();
+  saveVehicles(v);
   renderAdmin();
 }
 function uploadPhoto(id, input){
@@ -5914,7 +5848,7 @@ function uploadPhoto(id, input){
     if(!dataUrl) return;
     const v = VEHICLES.find(x => x.id === id);
     v.photo = dataUrl;
-    saveVehicles();
+    saveVehicles(v);
     renderAdmin();
   });
 }
@@ -5960,7 +5894,7 @@ function submitNewVehicle(){
     return;
   }
 
-  VEHICLES.push({
+  const newVehicle = {
     id: genId('V'),
     name: d.name.trim(),
     colour: d.colour.trim(),
@@ -5974,9 +5908,10 @@ function submitNewVehicle(){
     photo: d.photo,
     hidden: false,
     soldOut: false,
-  });
+  };
+  VEHICLES.push(newVehicle);
 
-  saveVehicles();
+  saveVehicles(newVehicle);
   newVehicleDraft = null;
   renderAdmin();
 }
@@ -6139,7 +6074,7 @@ function restartTour(){
   // background (and likely had its live connection quietly dropped) being switched back to.
   document.addEventListener('visibilitychange', () => {
     if(document.visibilityState === 'visible' && state.isAdmin){
-      syncFromSupabase();
+      if(state.page === 'admin' && !userIsActivelyEditing()){ silentRefresh(syncFromSupabase); } else { syncFromSupabase(); }
       if(realtimeStatus !== 'live'){
         if(adminRealtimeChannel){ try{ adminRealtimeChannel.unsubscribe(); }catch(e){} adminRealtimeChannel = null; }
         subscribeAdminRealtime();
