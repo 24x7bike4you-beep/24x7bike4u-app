@@ -1071,9 +1071,14 @@ async function deleteCustomer(id){
     : '';
   if(!confirm(`Delete the profile for "${c.name || 'this customer'}"? This cannot be undone.${warn}`)) return;
 
+  const deleted = await sbDeleteCustomerRow(id);
+  if(!deleted){
+    alert("Couldn't delete this profile from the server -- most likely the database needs a delete permission added for it (same kind of one-time setup the Storage buckets needed earlier). Nothing was removed; please check your connection and try again, or let me know if this keeps happening.");
+    return;
+  }
+
   CUSTOMERS = CUSTOMERS.filter(x => x.id !== id);
   deleteCustomerLocal(id);
-  sbDeleteCustomerRow(id);
 
   // Clear this customer's uploaded KYC photos from Storage.
   const photoFiles = await listStorageFolder(id, STORAGE_BUCKET);
@@ -2585,6 +2590,81 @@ function compressAllStoredCustomerPhotos(btn){
   });
 }
 
+// Two profiles are treated as duplicates when they share the same 10-digit mobile
+// number -- the one identifier a person genuinely can't have two of, unlike email (work
+// vs personal) or name (spelling variants). For each duplicate group, the most complete
+// profile (verified status, most photos/fields filled, then oldest) survives; anything
+// the survivor is missing gets filled in from the other(s), every booking moves over to
+// the survivor, and the duplicate record itself is removed. The duplicate's uploaded
+// photo files in Storage are deliberately left alone rather than deleted -- some of them
+// may now be directly referenced by the surviving profile's fields.
+function normalizedMobile10(m){
+  return (m || '').replace(/\D/g, '').slice(-10);
+}
+async function mergeDuplicateCustomers(btn){
+  if(btn){ btn.disabled = true; btn.textContent = 'Scanning…'; }
+  const groups = new Map();
+  CUSTOMERS.forEach(c => {
+    const key = normalizedMobile10(c.mobile);
+    if(key.length !== 10) return; // no usable mobile number to match on -- leave alone
+    if(!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(c);
+  });
+  const dupGroups = Array.from(groups.values()).filter(g => g.length > 1);
+
+  if(dupGroups.length === 0){
+    if(btn){ btn.disabled = false; btn.textContent = '🔗 Merge duplicates'; }
+    alert('No duplicate profiles found -- every customer has a unique mobile number.');
+    return;
+  }
+  if(!confirm(`Found ${dupGroups.length} group(s) of duplicate profiles (same mobile number). Merge each group into one profile automatically? Bookings move to the surviving profile, and any missing details are filled in from the duplicate. This cannot be undone.`)){
+    if(btn){ btn.disabled = false; btn.textContent = '🔗 Merge duplicates'; }
+    return;
+  }
+
+  const PHOTO_FIELDS = ['selfie','aadharFront','aadharBack','licenseFront','licenseBack'];
+  const score = c => {
+    let s = c.verificationStatus === 'verified' ? 100 : 0;
+    PHOTO_FIELDS.forEach(f => { if(c[f]) s += 1; });
+    if(c.address) s += 1;
+    if(c.emergency) s += 1;
+    return s;
+  };
+
+  dupGroups.forEach(group => {
+    const sorted = group.slice().sort((a, b) => {
+      const diff = score(b) - score(a);
+      return diff !== 0 ? diff : new Date(a.createdAt || 0) - new Date(b.createdAt || 0); // tie -> older wins
+    });
+    const canonical = sorted[0];
+    sorted.slice(1).forEach(dup => {
+      if(!canonical.address && dup.address) canonical.address = dup.address;
+      if(!canonical.emergency && dup.emergency) canonical.emergency = dup.emergency;
+      PHOTO_FIELDS.forEach(f => { if(!canonical[f] && dup[f]) canonical[f] = dup[f]; });
+      if(canonical.verificationStatus !== 'verified' && dup.verificationStatus === 'verified'){
+        canonical.verificationStatus = 'verified';
+      }
+      BOOKINGS.forEach(bk => {
+        if(bk.customerId === dup.id){
+          bk.customerId = canonical.id;
+          bk.customerName = canonical.name || bk.customerName;
+          bk.customerEmail = canonical.email || bk.customerEmail;
+          bk.customerMobile = canonical.mobile || bk.customerMobile;
+        }
+      });
+      CUSTOMERS = CUSTOMERS.filter(c => c.id !== dup.id);
+      sbDeleteCustomerRow(dup.id);
+    });
+    canonical.modifiedAt = new Date().toISOString();
+  });
+
+  saveCustomers(); // bulk push -- several surviving profiles changed at once
+  saveBookings();
+  if(btn){ btn.disabled = false; btn.textContent = '🔗 Merge duplicates'; }
+  renderAdmin();
+  alert(`Merged ${dupGroups.length} group${dupGroups.length===1?'':'s'} of duplicate profiles. Linked bookings were moved to the surviving profile in each case.`);
+}
+
 // Uploads a freshly-captured/chosen photo to Supabase Storage right away, rather than
 // waiting until the whole form is submitted -- an optimization so the eventual customer
 // database row stays small (a URL instead of an embedded image), not something that has
@@ -2776,6 +2856,11 @@ async function submitCustomerSignup(){
   const emergency = d.emergency.trim();
   if(!/^\d{10}$/.test(mobile)){
     showErr('Please enter a valid 10-digit mobile number.');
+    return;
+  }
+  const existingByMobile = CUSTOMERS.find(c => (c.mobile || '').trim() === mobile);
+  if(existingByMobile){
+    showErr(`An account with this mobile number already exists (${existingByMobile.name || 'profile on file'}) -- please log in instead, or use "Forgot password" if needed.`);
     return;
   }
   if(!/^\d{10}$/.test(emergency)){
@@ -3790,6 +3875,7 @@ function renderCustomersAdminHtml(){
         </div>
         <button class="btn-ghost" onclick="refreshCustomersFromCloud(this)">🔄 Refresh</button>
         <button class="btn-ghost" onclick="compressAllStoredCustomerPhotos(this)">🗜 Compress photos</button>
+        <button class="btn-ghost" onclick="mergeDuplicateCustomers(this)">🔗 Merge duplicates</button>
       </div>
     </div>
     ${newCustomerDraft ? renderNewCustomerFormHtml() : ''}
