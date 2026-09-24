@@ -808,73 +808,81 @@ async function syncFromSupabase(){
   // wholesale replaced, same protection bookings/customers already had, using each
   // vehicle's own modifiedAt (stamped by saveVehicles above) to decide which side is
   // actually newer when the same vehicle differs on both sides.
-  if(Array.isArray(remoteVehicles) && (remoteVehicles.length || VEHICLES.length === 0)){
-    const merged = mergeById(VEHICLES, remoteVehicles, ['modifiedAt']);
-    const localHadExtra = merged.length > remoteVehicles.length || merged.some(v => {
+  //
+  // Merging (unlike the old wholesale-replace pattern) can never lose data even if the
+  // remote side is empty or missing -- merging with nothing is a safe no-op. So this now
+  // always merges regardless of whether the fetch came back empty, and only skips the
+  // "push local back up" step on a genuine fetch failure. Previously, gating the merge
+  // itself behind "only if non-empty" meant a single transient fetch hiccup -- on any one
+  // sync attempt, even while the live connection showed connected -- would silently skip
+  // picking up real changes, which is what made syncing feel inconsistent.
+  const vehiclesFetchFailed = !Array.isArray(remoteVehicles);
+  const vMerged = mergeById(VEHICLES, vehiclesFetchFailed ? [] : remoteVehicles, ['modifiedAt']);
+  VEHICLES = vMerged;
+  if(!vehiclesFetchFailed){
+    const vLocalExtra = vMerged.length > remoteVehicles.length || vMerged.some(v => {
       const r = remoteVehicles.find(rv => rv.id === v.id);
       return r && JSON.stringify(r) !== JSON.stringify(v);
     });
-    VEHICLES = merged;
-    if(localHadExtra) sbSet('vehicles', VEHICLES); // this device had a vehicle (or a newer edit to one) the cloud didn't yet -- push the merged list back up so it catches up
-  } else {
-    sbSet('vehicles', VEHICLES);
+    if(vLocalExtra) sbSet('vehicles', VEHICLES); // this device had a vehicle (or a newer edit to one) the cloud didn't yet -- push the merged list back up so it catches up
   }
 
   // Customers now live as one small row per customer (see sbGetAllCustomerRows/
   // sbSetOneCustomer's comments) rather than one shared blob -- this pulls both that and
   // anything still sitting under the old single-blob scheme (remoteCustomersLegacy, kept
   // only for migrating data saved before this change) and merges everything together.
-  // Guarded and merged the same way as before: an empty/missing remote result never wipes
-  // out customers this browser already has, and matching ids keep whichever is newer.
+  const customersFetchFailed = !Array.isArray(remoteCustomerRows) && !Array.isArray(remoteCustomersLegacy);
   const remoteCustomersCombined = mergeById(
     Array.isArray(remoteCustomerRows) ? remoteCustomerRows : [],
     Array.isArray(remoteCustomersLegacy) ? remoteCustomersLegacy : [],
     ['modifiedAt', 'createdAt']
   );
-  if(remoteCustomersCombined.length || CUSTOMERS.length === 0){
-    const merged = mergeById(CUSTOMERS, remoteCustomersCombined, ['modifiedAt', 'createdAt']);
-    const localExtras = merged.filter(c => !remoteCustomersCombined.some(r => r.id === c.id));
-    CUSTOMERS = merged;
-    saveAllCustomersLocal();
-    lastSyncOk.customers = true;
-    localExtras.forEach(c => sbSetOneCustomer(c)); // this device had customers the cloud didn't yet -- push each up as its own small row so it catches up
-  } else {
-    CUSTOMERS.forEach(c => sbSetOneCustomer(c));
+  const cMerged = mergeById(CUSTOMERS, remoteCustomersCombined, ['modifiedAt', 'createdAt']);
+  CUSTOMERS = cMerged;
+  saveAllCustomersLocal();
+  lastSyncOk.customers = !customersFetchFailed;
+  if(!customersFetchFailed){
+    const cLocalExtras = cMerged.filter(c => !remoteCustomersCombined.some(r => r.id === c.id));
+    if(cLocalExtras.length) cLocalExtras.forEach(c => sbSetOneCustomer(c)); // this device had customers the cloud didn't yet -- push each up as its own small row so it catches up
   }
 
-  if(Array.isArray(remoteBookings) && (remoteBookings.length || BOOKINGS.length === 0)){
-    const merged = mergeById(BOOKINGS, remoteBookings, ['modifiedAt', 'agreedAt']);
-    const localHadExtra = merged.length > remoteBookings.length;
-    BOOKINGS = merged;
-    if(localHadExtra) sbSet('bookings', BOOKINGS);
-  } else {
+  const bookingsFetchFailed = !Array.isArray(remoteBookings);
+  const bMerged = mergeById(BOOKINGS, bookingsFetchFailed ? [] : remoteBookings, ['modifiedAt', 'agreedAt']);
+  BOOKINGS = bMerged;
+  if(!bookingsFetchFailed && bMerged.length > remoteBookings.length){
     sbSet('bookings', BOOKINGS);
   }
 
-  if(Array.isArray(remoteNotifications) && (remoteNotifications.length || NOTIFICATIONS.length === 0)){
-    NOTIFICATIONS = remoteNotifications;
-  } else {
+  const notificationsFetchFailed = !Array.isArray(remoteNotifications);
+  NOTIFICATIONS = mergeById(NOTIFICATIONS, notificationsFetchFailed ? [] : remoteNotifications, ['createdAt']);
+  if(!notificationsFetchFailed && NOTIFICATIONS.length > remoteNotifications.length){
     sbSet('notifications', NOTIFICATIONS);
   }
 
   const remoteCoupons = await sbGet('coupons');
-  if(Array.isArray(remoteCoupons) && (remoteCoupons.length || COUPONS.length === 0)){
-    COUPONS = remoteCoupons;
-  } else {
-    sbSet('coupons', COUPONS);
+  const couponsFetchFailed = !Array.isArray(remoteCoupons);
+  COUPONS = mergeById(COUPONS, couponsFetchFailed ? [] : remoteCoupons, ['modifiedAt', 'createdAt']);
+  if(!couponsFetchFailed && COUPONS.length > remoteCoupons.length){
+    sbSet('coupons', COUPONS); // this device had a coupon the cloud didn't yet -- push the merged list back up
   }
 
+  // Payment settings and Terms are single config objects, not lists -- there's nothing to
+  // "merge" the way arrays are merged above, and critically, this device's in-memory copy
+  // starts out as hard-coded *defaults* on every fresh page load now (no local cache to
+  // fall back on). That combination used to be dangerous: if a sync attempt's fetch simply
+  // failed (a transient blip, nothing to do with whether real settings exist), the old
+  // code treated that exactly like "nothing saved yet" and pushed these blank defaults up
+  // to Supabase -- permanently overwriting a real Razorpay key or terms text with nothing.
+  // So these are never auto-pushed as a side effect of a routine sync failing; they're
+  // only ever written when the admin explicitly saves them (savePaymentSettings/saveTerms,
+  // both called directly from the Payments/Terms admin screens).
   if(remotePaymentSettings && typeof remotePaymentSettings === 'object'){
     PAYMENT_SETTINGS = Object.assign({}, DEFAULT_PAYMENT_SETTINGS, remotePaymentSettings);
-  } else {
-    sbSet('paymentSettings', PAYMENT_SETTINGS);
   }
 
   if(remoteTerms && typeof remoteTerms === 'object' && remoteTerms.text){
     TERMS_TEXT = remoteTerms.text;
     TERMS_VERSION = remoteTerms.version || TERMS_VERSION;
-  } else {
-    sbSet('terms', { text: TERMS_TEXT, version: TERMS_VERSION });
   }
 
   checkOverdueBookings();
@@ -1126,10 +1134,17 @@ function saveBookings(){
   });
 }
 
-function deleteBooking(id){
+async function deleteBooking(id){
   const bk = BOOKINGS.find(x => x.id === id);
   if(!bk) return;
   if(!confirm(`Delete booking ${bookingDisplayNumber(bk.id)} (${bk.vehicleName} -- ${bk.customerName})? This cannot be undone.`)) return;
+  // Same document cleanup the customer cascade-delete already does -- otherwise a booking
+  // deleted this way (not via its customer) would leave its invoice/agreement files
+  // orphaned in Storage indefinitely instead of the usual 30-day cleanup ever reaching them.
+  const docFiles = await listStorageFolder(bk.id, DOCS_BUCKET);
+  if(docFiles && docFiles.length){
+    await deleteFromStorage(docFiles.map(f => `${bk.id}/${f.name}`), DOCS_BUCKET);
+  }
   BOOKINGS = BOOKINGS.filter(x => x.id !== id);
   saveBookings();
   renderAdmin();
@@ -1202,6 +1217,7 @@ function saveNewCoupon(){
     code, type: d.type, value,
     expiresAt: d.expiresAt || null,
     active: true,
+    createdAt: new Date().toISOString(),
   });
   saveCoupons();
   newCouponDraft = null;
@@ -1211,6 +1227,7 @@ function toggleCouponActive(id){
   const c = COUPONS.find(x => x.id === id);
   if(!c) return;
   c.active = !c.active;
+  c.modifiedAt = new Date().toISOString();
   saveCoupons();
   renderAdmin();
 }
@@ -2632,13 +2649,13 @@ async function mergeDuplicateCustomers(btn){
     return s;
   };
 
-  dupGroups.forEach(group => {
+  for(const group of dupGroups){
     const sorted = group.slice().sort((a, b) => {
       const diff = score(b) - score(a);
       return diff !== 0 ? diff : new Date(a.createdAt || 0) - new Date(b.createdAt || 0); // tie -> older wins
     });
     const canonical = sorted[0];
-    sorted.slice(1).forEach(dup => {
+    for(const dup of sorted.slice(1)){
       if(!canonical.address && dup.address) canonical.address = dup.address;
       if(!canonical.emergency && dup.emergency) canonical.emergency = dup.emergency;
       PHOTO_FIELDS.forEach(f => { if(!canonical[f] && dup[f]) canonical[f] = dup[f]; });
@@ -2653,11 +2670,18 @@ async function mergeDuplicateCustomers(btn){
           bk.customerMobile = canonical.mobile || bk.customerMobile;
         }
       });
-      CUSTOMERS = CUSTOMERS.filter(c => c.id !== dup.id);
-      sbDeleteCustomerRow(dup.id);
-    });
+      // Awaited so a failed delete (e.g. a missing database permission) is known before
+      // this device forgets about the duplicate locally -- otherwise a silently-failed
+      // delete here would mean the "merged away" duplicate just reappears on the next sync.
+      const deleted = await sbDeleteCustomerRow(dup.id);
+      if(deleted){
+        CUSTOMERS = CUSTOMERS.filter(c => c.id !== dup.id);
+      } else {
+        console.warn('Bike4u: could not delete duplicate customer row', dup.id, '-- it will remain and may need merging again next time.');
+      }
+    }
     canonical.modifiedAt = new Date().toISOString();
-  });
+  }
 
   saveCustomers(); // bulk push -- several surviving profiles changed at once
   saveBookings();
@@ -3586,6 +3610,7 @@ function renderAdmin(){
         </div>
         <div style="display:flex;gap:8px;">
           ${state.adminTab === 'vehicles' ? `<button class="btn-ghost" onclick="toggleAddForm()">${newVehicleDraft ? 'Cancel' : '+ Add vehicle'}</button>
+          <button class="btn-ghost" onclick="offloadStoredVehiclePhotos(this)">🗜 Offload photos</button>
           <button class="btn-ghost" onclick="resetFleetToDefaults()">Reset to defaults</button>` : ''}
           ${state.adminTab === 'customers' ? `<button class="btn-ghost" onclick="toggleAddCustomerForm()">${newCustomerDraft ? 'Cancel' : '+ Add customer'}</button>` : ''}
           ${state.adminTab === 'bookings' ? `<button class="btn-ghost" onclick="toggleNewBookingForm()">${newBookingDraft ? 'Cancel' : '+ New booking'}</button>` : ''}
@@ -4271,6 +4296,7 @@ function bookingCardHtml(bk){
         ${bk.customerMobile ? `<button class="btn-ghost" style="background:var(--whatsapp);color:#fff;border-color:var(--whatsapp);" onclick="shareBookingOnWhatsapp('${bk.id}')">💬 Share on WhatsApp</button>` : ''}
         <button class="btn-ghost" onclick="sendCustomerNotification('${bk.id}','return')">🔔 Remind to return</button>
         <button class="btn-ghost" onclick="sendCustomerNotification('${bk.id}','extension')">📅 Ask about extension</button>
+        <button class="btn-ghost" onclick="sendInvoiceOnWhatsapp('${bk.id}', 'booking')">🧾 Send invoice</button>
         <button class="btn-ghost" style="background:var(--teal);color:#0B1615;border-color:var(--teal);" onclick="toggleExtendForm('${bk.id}')">🕒 ${extendDraft && extendDraft.bookingId===bk.id ? 'Cancel extend' : 'Extend rental'}</button>
         ${bk.returnedAt
           ? `<button class="btn-ghost" style="color:#7EE2B8;border-color:#123A28;" onclick="markBookingReturned('${bk.id}', false)">↩ Marked returned ${fmtDate(bk.returnedAt.slice(0,10))} — undo</button>`
@@ -5928,19 +5954,49 @@ function toggleSoldOut(id){
   saveVehicles(v);
   renderAdmin();
 }
+// Vehicle photos get the same treatment customer photos already have: uploaded to
+// Storage and only a small URL kept on the vehicle record, instead of embedding the full
+// image directly. Vehicles are still one shared record (never migrated to individual rows
+// the way customers were), so an embedded photo on even a few vehicles was exactly the
+// kind of bloated-shared-record problem that caused customer syncing to fail intermittently
+// before that fix -- this closes the same gap for vehicles. Reuses the existing
+// customer-photos bucket under a vehicle/ prefix rather than requiring a new bucket, since
+// bucket permissions are already granted there.
 function uploadPhoto(id, input){
   const file = input.files[0];
   if(!file) return;
-  compressImageFile(file, 1000, 0.78, dataUrl => {
+  compressImageFile(file, 1000, 0.78, async dataUrl => {
     if(!dataUrl) return;
     const v = VEHICLES.find(x => x.id === id);
-    v.photo = dataUrl;
+    if(!v) return;
+    v.photo = dataUrl; // instant preview while the upload is in flight
+    renderAdmin();
+    const url = await uploadToStorage(`vehicle/${id}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
+    if(url) v.photo = url;
     saveVehicles(v);
     renderAdmin();
   });
 }
 
-/* ============ ADMIN: ADD VEHICLE ============ */
+// Retroactively moves any vehicle photo still embedded as a data: URL (from before the
+// fix above) out to Storage, shrinking the shared vehicles record they all still live in.
+function offloadStoredVehiclePhotos(btn){
+  const jobs = VEHICLES.filter(v => v.photo && typeof v.photo === 'string' && v.photo.startsWith('data:'));
+  if(jobs.length === 0){
+    alert('Nothing to offload -- no vehicle photos are stored as embedded images.');
+    return;
+  }
+  if(btn){ btn.disabled = true; btn.textContent = 'Offloading…'; }
+  Promise.all(jobs.map(async v => {
+    const url = await uploadToStorage(`vehicle/${v.id}-${Date.now()}.jpg`, dataUrlToBlob(v.photo));
+    if(url){ v.photo = url; v.modifiedAt = new Date().toISOString(); }
+  })).then(() => {
+    if(btn){ btn.disabled = false; btn.textContent = '🗜 Offload photos'; }
+    sbSet('vehicles', VEHICLES);
+    renderAdmin();
+  });
+}
+
 let newVehicleDraft = null;
 let manualBlockDraft = null; // vehicleId currently showing the "mark as rented" date/time form, or null
 let termsDraft = null; // null = not editing; string = draft text being edited
@@ -5959,9 +6015,12 @@ function setDraftType(t){
 function draftPhotoUpload(input){
   const file = input.files[0];
   if(!file) return;
-  compressImageFile(file, 1000, 0.78, dataUrl => {
+  compressImageFile(file, 1000, 0.78, async dataUrl => {
     if(!dataUrl) return;
-    newVehicleDraft.photo = dataUrl;
+    newVehicleDraft.photo = dataUrl; // instant preview while the upload is in flight
+    renderAdmin();
+    const url = await uploadToStorage(`vehicle/draft-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
+    if(url && newVehicleDraft) newVehicleDraft.photo = url; // still in the same draft (not submitted/cancelled meanwhile)
     renderAdmin();
   });
 }
