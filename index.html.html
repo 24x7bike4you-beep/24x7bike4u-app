@@ -811,6 +811,7 @@ function mergeById(local, remote, tsFields){
 
 let lastSyncAt = 0;
 function syncIfStale(maxAgeMs){
+  if(resetInProgress) return;
   if(Date.now() - lastSyncAt <= (maxAgeMs || 90000)) return;
   if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()){
     silentRefresh(syncFromSupabase);
@@ -819,7 +820,18 @@ function syncIfStale(maxAgeMs){
   }
 }
 
+// Set while an intentional bulk deletion (the factory reset) is running, and for a short
+// window after -- every background sync mechanism below checks this and stands down while
+// it's true. This exists because the merge-based sync logic elsewhere is deliberately
+// built to *never* lose data (that's what fixed several earlier bugs), which works against
+// an intentional bulk delete: a background read that was already in flight when the reset
+// ran can return the old data a moment later, and merging that back in would silently
+// "undo" the reset that had just happened, which is exactly what made it look like
+// clicking reset had no effect.
+let resetInProgress = false;
+
 async function syncFromSupabase(){
+  if(resetInProgress) return;
   lastSyncAt = Date.now();
   const [remoteVehicles, remoteCustomerRows, remoteCustomersLegacy, remoteBookings, remoteNotifications, remotePaymentSettings, remoteTerms] = await Promise.all([
     sbGet('vehicles'), sbGetAllCustomerRows(), sbGet('customers'), sbGet('bookings'), sbGet('notifications'), sbGet('paymentSettings'), sbGet('terms')
@@ -2661,30 +2673,50 @@ function normalizedMobile10(m){
 // rather than a plain OK/Cancel, since there's no undo for this.
 async function factoryResetBookingsAndCustomers(btn){
   const typed = prompt('This will PERMANENTLY delete every customer profile, every booking, and all their uploaded photos/invoices. Vehicles, coupons, terms and payment settings are not affected. This cannot be undone.\n\nType RESET to confirm:');
-  if(typed !== 'RESET') return;
+  if((typed || '').trim().toUpperCase() !== 'RESET'){
+    if(typed !== null) alert('Reset cancelled -- you need to type RESET exactly (nothing was deleted).');
+    return;
+  }
 
+  resetInProgress = true; // stands down every background sync mechanism -- see its declaration for why this matters here specifically
   if(btn){ btn.disabled = true; btn.textContent = 'Resetting…'; }
 
+  const failedCustomers = [];
   for(const c of CUSTOMERS.slice()){
-    await sbDeleteCustomerRow(c.id);
+    const ok = await sbDeleteCustomerRow(c.id);
+    if(ok){ CUSTOMERS = CUSTOMERS.filter(x => x.id !== c.id); }
+    else{ failedCustomers.push(c.name || c.id); }
   }
-  CUSTOMERS = [];
 
-  BOOKINGS = [];
-  await sbSet('bookings', BOOKINGS);
+  const priorBookingCount = BOOKINGS.length;
+  const bookingsOk = await sbSet('bookings', []);
+  if(bookingsOk) BOOKINGS = [];
 
-  // Clear every customer photo, but not vehicle photos -- both live in this same bucket
-  // (vehicle photos use a vehicle/ prefix specifically so they could be told apart here).
   const photoFiles = await listAllStorageFiles(STORAGE_BUCKET);
-  const customerPhotoFiles = photoFiles.filter(p => !p.startsWith('vehicle/'));
+  const customerPhotoFiles = (photoFiles || []).filter(p => !p.startsWith('vehicle/'));
   if(customerPhotoFiles.length) await deleteFromStorage(customerPhotoFiles, STORAGE_BUCKET);
 
   const docFiles = await listAllStorageFiles(DOCS_BUCKET);
-  if(docFiles.length) await deleteFromStorage(docFiles, DOCS_BUCKET);
+  if(docFiles && docFiles.length) await deleteFromStorage(docFiles, DOCS_BUCKET);
+
+  renderAdmin();
+
+  // Keep background sync paused for a few seconds after finishing -- a read that was
+  // already in flight when the deletes above ran can still land a moment later with the
+  // old (now-deleted) data, and without this grace window that stale read would get
+  // merged straight back in, silently undoing the reset that just happened.
+  setTimeout(() => {
+    resetInProgress = false;
+    syncFromSupabase();
+  }, 4000);
 
   if(btn){ btn.disabled = false; btn.textContent = '⚠️ Factory reset (bookings & customers)'; }
-  renderAdmin();
-  alert('Done -- every booking and customer profile (with their photos and documents) has been permanently deleted. The next booking will start fresh at BK' + String(new Date().getFullYear()).slice(-2) + '-01.');
+
+  if(failedCustomers.length || !bookingsOk){
+    alert(`Reset finished with some failures:\n${!bookingsOk ? `- Could not clear ${priorBookingCount} booking(s) -- most likely a missing database permission (same kind of setup the other buckets needed).\n` : ''}${failedCustomers.length ? `- Could not delete ${failedCustomers.length} customer profile(s): ${failedCustomers.join(', ')}\n` : ''}\nEverything else was cleared. You can run this again to retry just what failed.`);
+  } else {
+    alert('Done -- every booking and customer profile (with their photos and documents) has been permanently deleted. The next booking will start fresh at BK' + String(new Date().getFullYear()).slice(-2) + '-01.');
+  }
 }
 
 async function mergeDuplicateCustomers(btn){
@@ -3470,12 +3502,14 @@ async function subscribeAdminRealtime(){
     adminRealtimeChannel = client
       .channel('admin-notifications')
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_data', filter: 'key=eq.vehicles' }, (payload) => {
+        if(resetInProgress) return;
         const arr = payload && payload.new && payload.new.value;
         if(!Array.isArray(arr)) return;
         VEHICLES = mergeById(VEHICLES, arr, ['modifiedAt']);
             if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_data', filter: 'key=eq.bookings' }, (payload) => {
+        if(resetInProgress) return;
         const arr = payload && payload.new && payload.new.value;
         if(!Array.isArray(arr)) return;
         const localById = new Map(BOOKINGS.map(b => [b.id, b]));
@@ -3512,6 +3546,7 @@ async function subscribeAdminRealtime(){
         }
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_data', filter: 'key=eq.customers' }, (payload) => {
+        if(resetInProgress) return;
         // Legacy path: kept only for any data still under the old single-blob 'customers'
         // key from before customers moved to individual rows below. New signups no longer
         // write here at all.
@@ -3534,6 +3569,7 @@ async function subscribeAdminRealtime(){
       // periodic refresh, since Postgres doesn't reliably include the deleted row's data
       // without extra replica-identity configuration this app doesn't control).
       .on('postgres_changes', { event: '*', schema: 'public', table: 'app_data' }, (payload) => {
+        if(resetInProgress) return;
         if(payload.eventType === 'DELETE') return;
         const key = payload.new && payload.new.key;
         if(!key || !key.startsWith(CUSTOMER_ROW_PREFIX)) return;
@@ -3564,7 +3600,7 @@ async function subscribeAdminRealtime(){
 // nothing extra, exactly as before, and only a stale one quietly catches itself up.
 function startRealtimeFallbackWatchdog(){
   setInterval(() => {
-    if(!state.isAdmin) return;
+    if(!state.isAdmin || resetInProgress) return;
     if(realtimeStatus !== 'live'){
       // Catch up on anything missed while not connected -- wrapped so this can never
       // cause a visible flicker if it happens to run while someone's looking at the screen.
