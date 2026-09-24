@@ -599,16 +599,17 @@ async function getSupabase(){
   if(sb) return sb;
   if(sbClientPromise) return sbClientPromise;
   sbClientPromise = (async () => {
-    const ready = await waitForSupabaseLib(6000);
+    const ready = await waitForSupabaseLib(10000);
     if(!ready){
-      console.warn('Bike4u: Supabase library never became available -- check your network/ad-blocker; sync unavailable for this call.');
+      console.warn('Bike4u: Supabase library not available within 10s -- will retry on the next call rather than staying failed for the rest of this session.');
+      sbClientPromise = null; // don't cache a failure -- the library may simply still be loading (a slow CDN, a slow connection), and the next call should get a fresh chance rather than being stuck permanently failed until a full page reload
       return null;
     }
     try{
       sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
       console.log('Bike4u: Supabase client ready.');
       return sb;
-    }catch(e){ console.warn('Bike4u: Supabase client init failed:', e); return null; }
+    }catch(e){ console.warn('Bike4u: Supabase client init failed:', e); sbClientPromise = null; return null; }
   })();
   return sbClientPromise;
 }
@@ -6153,6 +6154,11 @@ function restartTour(){
   }
   render();
   syncFromSupabase();
+  // A second attempt shortly after covers the case where the first one ran before the
+  // Supabase library had actually finished loading from its CDN (getSupabase's own retry
+  // fix above handles this over time too, but this makes sure a normal page load gets a
+  // second, near-immediate chance rather than waiting on the next background trigger).
+  setTimeout(() => syncFromSupabase(), 3000);
   resumePendingSyncs(); // picks up any signup/booking that failed to reach the cloud in a previous session on this device, and quietly finishes the job
   startRealtimeFallbackWatchdog();
   // Catch up immediately when this tab becomes active again, rather than waiting for the
