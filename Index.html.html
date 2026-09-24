@@ -108,18 +108,20 @@
     'https://unpkg.com/@supabase/supabase-js@2',
     'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2'
   ];
-  function tryLoad(i){
-    if(i >= sources.length){
-      console.warn('Bike4u: could not load the Supabase library from any CDN -- cross-device sync will be unavailable, only this browser\'s local cache will be used.');
-      return;
-    }
+  // Loads every CDN source at once, in parallel, instead of trying one and only moving to
+  // the next after it actually errors out -- a CDN that's simply slow (not broken) on a
+  // given network/region can otherwise sit there for a long time before onerror ever
+  // fires, silently blocking the working fallback the whole time. Whichever source
+  // finishes first wins; a second one finishing after is harmless (same library, just
+  // redefines the same global).
+  sources.forEach(function(src){
     var s = document.createElement('script');
-    s.src = sources[i];
-    s.onload = function(){ console.log('Bike4u: Supabase library loaded from', sources[i]); };
-    s.onerror = function(){ tryLoad(i + 1); };
+    s.src = src;
+    s.async = true;
+    s.onload = function(){ console.log('Bike4u: Supabase library loaded from', src); };
+    s.onerror = function(){};
     document.head.appendChild(s);
-  }
-  tryLoad(0);
+  });
 })();
 
 // Caches the page shell so a repeat visit on a slow/flaky connection (or fully offline)
@@ -1655,17 +1657,30 @@ function silentRefresh(fn){
     applyAnimGuard();
     try{ await fn(); } finally { silentRefreshFlag = false; }
   };
-  if(!appEl){ run(); return; }
+  if(!appEl){ run().catch(e => console.warn('Bike4u: silentRefresh error', e)); return; }
   appEl.style.transition = 'opacity .18s ease';
   appEl.style.opacity = '0';
+  // .catch() before .finally() here is what actually matters: without it, fn() throwing
+  // or its promise rejecting for any reason (a network error, anything) meant the code
+  // that restores opacity back to 1 simply never ran -- leaving the page invisible
+  // (looking completely blank) until a manual reload. Now the page is guaranteed to
+  // become visible again either way, success or failure.
   setTimeout(() => {
-    run().then(() => {
+    run().catch(e => console.warn('Bike4u: silentRefresh run failed:', e)).finally(() => {
       requestAnimationFrame(() => {
         const el = document.getElementById('app'); // run() may have replaced the node's contents, not the node itself
         if(el) el.style.opacity = '1';
       });
     });
   }, 190);
+  // Belt-and-suspenders: forces the page visible again after a few seconds no matter what,
+  // in case something above this line ever fails to fire for a reason not yet accounted
+  // for. A page that's stuck invisible is a much worse failure than a slightly-early
+  // fade-in, so this errs on the side of always eventually showing something.
+  setTimeout(() => {
+    const el = document.getElementById('app');
+    if(el && el.style.opacity === '0') el.style.opacity = '1';
+  }, 3000);
 }
 
 // navigator.onLine only reflects "no network adapter at all", not a slow/flaky one, but
@@ -6213,11 +6228,15 @@ function restartTour(){
   }
   render();
   syncFromSupabase();
-  // A second attempt shortly after covers the case where the first one ran before the
-  // Supabase library had actually finished loading from its CDN (getSupabase's own retry
-  // fix above handles this over time too, but this makes sure a normal page load gets a
-  // second, near-immediate chance rather than waiting on the next background trigger).
-  setTimeout(() => syncFromSupabase(), 3000);
+  // A few staggered attempts shortly after cover the case where the first one ran before
+  // the Supabase library had actually finished loading from its CDN (getSupabase's own
+  // retry fix, plus loading both CDN sources in parallel above, both help too -- this adds
+  // a normal page load a few more near-immediate chances rather than waiting on the next
+  // background trigger, which is what made this feel like it sometimes needed several
+  // manual reloads before it "happened" to work).
+  setTimeout(() => syncFromSupabase(), 2000);
+  setTimeout(() => syncFromSupabase(), 5000);
+  setTimeout(() => syncFromSupabase(), 9000);
   resumePendingSyncs(); // picks up any signup/booking that failed to reach the cloud in a previous session on this device, and quietly finishes the job
   startRealtimeFallbackWatchdog();
   // Catch up immediately when this tab becomes active again, rather than waiting for the
