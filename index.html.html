@@ -1115,8 +1115,15 @@ async function deleteCustomer(id){
     : '';
   if(!confirm(`Delete the profile for "${c.name || 'this customer'}"? This cannot be undone.${warn}`)) return;
 
+  // Same protection the factory reset uses: pauses every background sync mechanism
+  // briefly so a read that was already in flight can't land moments later with the
+  // old (pre-delete) data and get merged straight back in, which is what made deleting
+  // a single customer/booking sometimes look like it silently didn't work.
+  resetInProgress = true;
+
   const deleted = await sbDeleteCustomerRow(id);
   if(!deleted){
+    resetInProgress = false;
     alert("Couldn't delete this profile from the server -- most likely the database needs a delete permission added for it (same kind of one-time setup the Storage buckets needed earlier). Nothing was removed; please check your connection and try again, or let me know if this keeps happening.");
     return;
   }
@@ -1141,6 +1148,8 @@ async function deleteCustomer(id){
     BOOKINGS = BOOKINGS.filter(bk => bk.customerId !== id);
     saveBookings();
   }
+
+  setTimeout(() => { resetInProgress = false; syncFromSupabase(); }, 4000);
 
   if(expandedCustomerId === id) expandedCustomerId = null;
   renderAdmin();
@@ -1173,6 +1182,9 @@ async function deleteBooking(id){
   const bk = BOOKINGS.find(x => x.id === id);
   if(!bk) return;
   if(!confirm(`Delete booking ${bookingDisplayNumber(bk.id)} (${bk.vehicleName} -- ${bk.customerName})? This cannot be undone.`)) return;
+
+  resetInProgress = true; // same protection the factory reset uses -- see its declaration for why this matters for any delete, not just the bulk one
+
   // Same document cleanup the customer cascade-delete already does -- otherwise a booking
   // deleted this way (not via its customer) would leave its invoice/agreement files
   // orphaned in Storage indefinitely instead of the usual 30-day cleanup ever reaching them.
@@ -1180,8 +1192,16 @@ async function deleteBooking(id){
   if(docFiles && docFiles.length){
     await deleteFromStorage(docFiles.map(f => `${bk.id}/${f.name}`), DOCS_BUCKET);
   }
-  BOOKINGS = BOOKINGS.filter(x => x.id !== id);
-  saveBookings();
+  const remaining = BOOKINGS.filter(x => x.id !== id);
+  const ok = await sbSet('bookings', remaining);
+  if(ok){
+    BOOKINGS = remaining;
+  } else {
+    resetInProgress = false;
+    alert("Couldn't delete this booking from the server -- please check your connection and try again.");
+    return;
+  }
+  setTimeout(() => { resetInProgress = false; syncFromSupabase(); }, 4000);
   renderAdmin();
 }
 
