@@ -689,6 +689,27 @@ async function listStorageFolder(prefix, bucket){
     return result.data || [];
   }catch(e){ return null; }
 }
+// Recursively walks an entire bucket (or a subfolder of one) and returns every actual
+// file's full path -- Supabase Storage doesn't have real folders, just object key
+// prefixes, so a "folder" shows up in .list() as an entry with no id; this follows those
+// down until it only has real files left. Used for bulk cleanup where there's no longer a
+// known list of ids to iterate (e.g. a full reset).
+async function listAllStorageFiles(bucket, prefix){
+  prefix = prefix || '';
+  const entries = await listStorageFolder(prefix, bucket);
+  if(!entries) return [];
+  let files = [];
+  for(const entry of entries){
+    const fullPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if(entry.id === null || entry.id === undefined){
+      const nested = await listAllStorageFiles(bucket, fullPath);
+      files = files.concat(nested);
+    } else {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
 
 // Invoices and agreements are only ever needed for a little while after a booking --
 // housekeeping, not a permanent record -- so this quietly clears out anything older than
@@ -2634,6 +2655,38 @@ function compressAllStoredCustomerPhotos(btn){
 function normalizedMobile10(m){
   return (m || '').replace(/\D/g, '').slice(-10);
 }
+// Wipes every customer and every booking (and their uploaded photos/documents in
+// Storage), leaving vehicles, coupons, terms and payment settings untouched -- for
+// starting fresh from booking #1. Deliberately requires typing a confirmation phrase
+// rather than a plain OK/Cancel, since there's no undo for this.
+async function factoryResetBookingsAndCustomers(btn){
+  const typed = prompt('This will PERMANENTLY delete every customer profile, every booking, and all their uploaded photos/invoices. Vehicles, coupons, terms and payment settings are not affected. This cannot be undone.\n\nType RESET to confirm:');
+  if(typed !== 'RESET') return;
+
+  if(btn){ btn.disabled = true; btn.textContent = 'Resetting…'; }
+
+  for(const c of CUSTOMERS.slice()){
+    await sbDeleteCustomerRow(c.id);
+  }
+  CUSTOMERS = [];
+
+  BOOKINGS = [];
+  await sbSet('bookings', BOOKINGS);
+
+  // Clear every customer photo, but not vehicle photos -- both live in this same bucket
+  // (vehicle photos use a vehicle/ prefix specifically so they could be told apart here).
+  const photoFiles = await listAllStorageFiles(STORAGE_BUCKET);
+  const customerPhotoFiles = photoFiles.filter(p => !p.startsWith('vehicle/'));
+  if(customerPhotoFiles.length) await deleteFromStorage(customerPhotoFiles, STORAGE_BUCKET);
+
+  const docFiles = await listAllStorageFiles(DOCS_BUCKET);
+  if(docFiles.length) await deleteFromStorage(docFiles, DOCS_BUCKET);
+
+  if(btn){ btn.disabled = false; btn.textContent = '⚠️ Factory reset (bookings & customers)'; }
+  renderAdmin();
+  alert('Done -- every booking and customer profile (with their photos and documents) has been permanently deleted. The next booking will start fresh at BK' + String(new Date().getFullYear()).slice(-2) + '-01.');
+}
+
 async function mergeDuplicateCustomers(btn){
   if(btn){ btn.disabled = true; btn.textContent = 'Scanning…'; }
   const groups = new Map();
@@ -4961,6 +5014,12 @@ function renderDashboardAdminHtml(){
           <div class="dash-vrow-amt">${money(v.income)} <span style="color:var(--text-faint);font-weight:500;">(${v.count})</span></div>
         </div>
       `).join('')}
+    </div>
+
+    <div class="card" style="margin-top:18px;border-color:var(--red);">
+      <div class="form-section-title" style="margin-bottom:6px;color:#F3A19C;">⚠️ Danger zone</div>
+      <p class="field-hint" style="margin-bottom:12px;">Permanently deletes every customer profile and every booking (plus their photos/documents), so the next booking starts fresh at BK${String(new Date().getFullYear()).slice(-2)}-01. Vehicles, coupons, terms and payment settings are untouched. This cannot be undone.</p>
+      <button class="btn-ghost" style="color:#F3A19C;border-color:#5A2A26;" onclick="factoryResetBookingsAndCustomers(this)">⚠️ Factory reset (bookings &amp; customers)</button>
     </div>
   `;
 }
