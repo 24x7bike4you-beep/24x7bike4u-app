@@ -5671,6 +5671,7 @@ function updateCustomerField(id, field, val){
       return;
     }
     c[field] = v.toLowerCase();
+    c.modifiedAt = new Date().toISOString();
     saveCustomers(c);
     renderAdmin();
     return;
@@ -5680,6 +5681,7 @@ function updateCustomerField(id, field, val){
     return;
   }
   c[field] = v;
+  c.modifiedAt = new Date().toISOString();
   saveCustomers(c);
   renderAdmin();
 }
@@ -5936,6 +5938,12 @@ async function docEditorSave(){
     c[fieldKey] = dataUrl;
     const url = await uploadToStorage(`${c.id}/${fieldKey}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
     if(url) c[fieldKey] = url;
+    // Without this, a background sync landing moments later (its fetch may have started
+    // before this save completed) sees an identical createdAt on both copies -- a tie
+    // that the merge resolves in favor of the "remote" side -- silently reverting this
+    // edit back to the pre-crop photo. Bumping modifiedAt is what earlier fixed the same
+    // class of bug for bookings/vehicles/coupons, and it's what makes this edit win.
+    c.modifiedAt = new Date().toISOString();
     saveCustomers(c);
     renderAdmin();
   }
