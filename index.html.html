@@ -1422,6 +1422,7 @@ let state = {
   dashboardPeriod: 'month',
   dashboardFrom: '',
   dashboardTo: '',
+  highlightVehicleId: null, // set when a vehicle's QR deep link is opened, so the list page can scroll to/highlight it
 };
 
 const CUSTOMER_SESSION_KEY = 'bike4u_customer_session_v1';
@@ -1958,6 +1959,10 @@ function renderHome(){
       <h1>Bike &amp; Scooter Rental in Indore</h1>
       <p class="lead">Pick a vehicle type, your dates and a km plan — we'll show transparent pricing, no surprises. Activa, Jupiter, Pulsar, Royal Enfield and more, available hourly, daily and weekly across Indore.</p>
       <button onclick="restartTour()" style="background:none;border:none;color:var(--yellow);font-size:12.5px;font-weight:600;padding:0 0 14px;cursor:pointer;">🧭 Take a quick tour</button>
+      ${state.highlightVehicleId ? (() => {
+        const hv = VEHICLES.find(v => v.id === state.highlightVehicleId);
+        return hv ? `<div class="note-box" style="margin-bottom:20px;">📷 Scanned: <strong style="color:var(--text);">${hv.name}</strong> — pick your dates below and tap Search to see its price.</div>` : '';
+      })() : ''}
       ${!state.currentCustomer ? `
       <div class="note-box" style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:20px;">
         <span>New here? Create your KYC profile once and book faster next time.</span>
@@ -2091,8 +2096,9 @@ function renderList(){
         const conflicts = v.soldOut ? [] : vehicleConflictingBookings(v.id, state.pickupDate, state.pickupTime, state.dropDate, state.dropTime);
         const blocked = conflicts.length > 0;
         const nextFree = blocked ? latestDropOf(conflicts) : null;
+        const isHighlighted = state.highlightVehicleId === v.id;
         return `
-        <div class="vcard" ${v.soldOut ? 'style="opacity:.55;"' : ''}>
+        <div class="vcard" id="vcard-${v.id}" ${v.soldOut ? 'style="opacity:.55;"' : isHighlighted ? 'style="border-color:var(--yellow);box-shadow:0 0 0 2px var(--yellow),0 10px 24px rgba(0,0,0,.4),0 0 24px rgba(255,122,26,.35);"' : ''}>
           <div class="vcard-photo-wrap">
             ${v.photo ? `<img src="${v.photo}" alt="${v.name}">` : vehicleIconSvg(v.type)}
           </div>
@@ -2126,6 +2132,136 @@ function renderList(){
       `}).join('')}</div>`}
     </div>
   `;
+  // Scroll a QR-deep-linked vehicle into view once, then clear the flag so it doesn't
+  // keep re-highlighting on later visits to this list.
+  if(state.highlightVehicleId){
+    const targetId = state.highlightVehicleId;
+    setTimeout(() => {
+      const el = document.getElementById(`vcard-${targetId}`);
+      if(el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 100);
+    state.highlightVehicleId = null;
+  }
+}
+
+/* ============ VEHICLE DETAIL PAGE (shared link / QR target) ============
+   A vehicle's QR code and any "share this vehicle" link both point here
+   (#book-vehicle/<id>) -- a standalone page for exactly that one vehicle, with its own
+   photo, live pricing and an editable date/km picker, so a customer who opens the link
+   sees the specific vehicle straight away instead of having to search the full list for
+   it again. Booking from here reuses selectVehicle(), the same path the vehicle list uses. */
+function renderVehicleDetailPage(vehicleId){
+  const appEl = document.getElementById('app');
+  const v = VEHICLES.find(x => x.id === vehicleId);
+  if(!v || v.hidden){
+    appEl.innerHTML = `
+      <div class="wrap page">
+        <div class="empty">
+          <h3>Vehicle not found</h3>
+          <p>This link may be out of date or the vehicle is no longer listed.</p>
+          <button class="btn-ghost" style="margin-top:14px;" onclick="goTo('home')">Browse all vehicles</button>
+        </div>
+      </div>`;
+    return;
+  }
+  state.type = v.type;
+  const plan = getPlan();
+  syncKmPackage(plan);
+  const b = billingBreakdown(v);
+  const rs = vehicleRentalStatus(v.id);
+  const conflicts = (!v.soldOut && plan.totalHours > 0) ? vehicleConflictingBookings(v.id, state.pickupDate, state.pickupTime, state.dropDate, state.dropTime) : [];
+  const blocked = conflicts.length > 0;
+  const nextFree = blocked ? latestDropOf(conflicts) : null;
+
+  appEl.innerHTML = `
+    <div class="wrap page">
+      <button class="back-btn" onclick="goTo('home')">← Browse all vehicles</button>
+
+      <div class="vcard" style="margin-bottom:20px;">
+        <div class="vcard-photo-wrap">
+          ${v.photo ? `<img src="${v.photo}" alt="${v.name}">` : vehicleIconSvg(v.type)}
+        </div>
+        <div class="vcard-body">
+          <div class="vcard-top">
+            <div>
+              <div class="vcard-name" style="font-size:19px;">${v.name}</div>
+              <div class="vcard-type">${v.colour} · ${v.rc}</div>
+            </div>
+            ${v.soldOut ? `<span class="badge badge-soldout">Sold out</span>` : rs.rented
+              ? `<span class="badge badge-rented">Rented · back ${fmtDate(rs.untilDate)}, ${fmtTime(rs.untilTime)}</span>`
+              : `<span class="badge badge-available">Available now</span>`}
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="field field-row">
+          <div>
+            <label>Pickup date</label>
+            <input type="date" value="${state.pickupDate}" min="${todayStr()}" onchange="setVehicleDetailField('${v.id}','pickupDate', this.value)">
+          </div>
+          <div>
+            <label>Pickup time</label>
+            <input type="time" value="${state.pickupTime}" onchange="setVehicleDetailField('${v.id}','pickupTime', this.value)">
+          </div>
+        </div>
+        <div class="field field-row">
+          <div>
+            <label>Drop-off date</label>
+            <input type="date" value="${state.dropDate}" min="${state.pickupDate || todayStr()}" onchange="setVehicleDetailField('${v.id}','dropDate', this.value)">
+          </div>
+          <div>
+            <label>Drop-off time</label>
+            <input type="time" value="${state.dropTime}" onchange="setVehicleDetailField('${v.id}','dropTime', this.value)">
+          </div>
+        </div>
+
+        ${plan.isPureWeekly ? `
+        <div class="field">
+          <label>Kilometres included</label>
+          <div class="note-box" style="margin:0;">Weekly rate applied — 700 km included per week × ${plan.weeks} week${plan.weeks > 1 ? 's' : ''} = ${plan.weeks * 700} km total.</div>
+        </div>
+        ` : `
+        <div class="field">
+          <label>Kilometres required</label>
+          <div class="km-options" style="grid-template-columns:repeat(${plan.kmOptions.length},1fr);">
+            ${plan.kmOptions.map(k => `
+              <button class="km-chip ${state.kmPackage===k?'active':''}" onclick="setVehicleDetailKm('${v.id}', ${k})">
+                <span class="n">${k}</span><span class="u">km${kmUnit(plan, k)}</span>
+              </button>
+            `).join('')}
+          </div>
+        </div>
+        `}
+
+        ${plan.totalHours > 0 ? `
+        <div class="vcard-stats" style="margin-top:8px;">
+          <div class="stat"><div class="v">${money(b.total)}</div><div class="k">Total for ${durationLabel(b.totalHours)}</div></div>
+          <div class="stat"><div class="v">${b.includedKm} km</div><div class="k">Included total kms</div></div>
+          <div class="stat"><div class="v">${money(v.deposit)}</div><div class="k">Deposit (refundable)</div></div>
+        </div>
+        <div class="field-hint" style="margin-top:8px;">Extra km charge: ₹${v.extraKm}/km beyond what's included.</div>
+        ` : `<div class="err" style="display:block;margin-top:14px;">Please check your dates — drop-off must be after pickup.</div>`}
+
+        ${v.soldOut
+          ? `<button class="btn-primary" disabled style="pointer-events:none;">Sold out</button>`
+          : blocked
+          ? `<button class="btn-primary" disabled style="pointer-events:none;">Not available for these dates</button>
+             <div class="field-hint" style="text-align:center;margin-top:8px;">Next free from ${fmtDate(nextFree.dropDate)}, ${fmtTime(nextFree.dropTime)} — try different dates.</div>`
+          : `<button class="btn-primary" onclick="selectVehicle('${v.id}')" ${plan.totalHours<=0 ? 'disabled' : ''}>Book this vehicle</button>`}
+      </div>
+    </div>
+  `;
+}
+function setVehicleDetailField(vehicleId, key, val){
+  if((key === 'pickupDate' || key === 'dropDate') && val < todayStr()){ val = todayStr(); }
+  state[key] = val;
+  if(key === 'pickupDate' && state.dropDate < val){ state.dropDate = val; }
+  renderVehicleDetailPage(vehicleId);
+}
+function setVehicleDetailKm(vehicleId, k){
+  state.kmPackage = k;
+  renderVehicleDetailPage(vehicleId);
 }
 
 function selectVehicle(id){
@@ -2453,6 +2589,31 @@ function statusPillHtml(c){
   if(s === 'verified') return `<span class="status-pill verified">✓ Verified</span>`;
   if(s === 'unverified') return `<span class="status-pill unverified">✕ Unverified</span>`;
   return `<span class="status-pill pending">Pending verification</span>`;
+}
+
+// Lets admin flag a customer (repeat no-show, damage, dispute, etc.) with a short reason
+// so front-desk sees a clear warning before renting to them again -- rather than relying
+// on someone remembering a past incident. A prompt() keeps this to one click instead of
+// a whole inline form, matching how deleteCustomer already uses confirm() for a similar
+// one-off admin action.
+function toggleCustomerFlag(id){
+  const c = CUSTOMERS.find(x => x.id === id);
+  if(!c) return;
+  if(c.flagged){
+    if(!confirm(`Remove the flag on "${c.name || 'this customer'}"?`)) return;
+    c.flagged = false;
+    c.flagReason = '';
+  } else {
+    const reason = prompt(`Why flag "${c.name || 'this customer'}"? (e.g. "No-show 12 Sep", "Damaged vehicle, refused to pay")\n\nThis shows as a clear warning wherever this customer comes up next, including when booking them in.`);
+    if(reason === null) return; // cancelled
+    if(!reason.trim()){ alert('Please enter a reason, so front-desk knows why this customer is flagged.'); return; }
+    c.flagged = true;
+    c.flagReason = reason.trim();
+    c.flaggedAt = new Date().toISOString();
+  }
+  c.modifiedAt = new Date().toISOString();
+  saveCustomers(c);
+  renderAdmin();
 }
 
 function restoreCustomerSession(){
@@ -3433,7 +3594,78 @@ const notifiedBookingCancelIds = new Set();
 const notifiedBookingExtendIds = new Set();
 const notifiedCustomerIds = new Set();
 
+// Plays a short two-tone chime using the Web Audio API -- no audio file or CDN needed,
+// so this always works the instant a new booking/signup comes in, regardless of whether
+// the browser's OS-level Notification permission was ever granted (which many admins
+// never bother to click "Allow" on, silently losing the one alert they actually wanted).
+function playAdminAlertSound(){
+  try{
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if(!Ctx) return;
+    const ctx = new Ctx();
+    const playTone = (freq, startAt, dur) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0, ctx.currentTime + startAt);
+      gain.gain.linearRampToValueAtTime(0.22, ctx.currentTime + startAt + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + startAt + dur);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + startAt);
+      osc.stop(ctx.currentTime + startAt + dur + 0.05);
+    };
+    playTone(880, 0, 0.16);
+    playTone(1318.5, 0.14, 0.22);
+    setTimeout(() => { try{ ctx.close(); }catch(e){} }, 600);
+  }catch(e){}
+}
+
+// A small in-page toast, independent of the browser's OS notification permission, so an
+// admin who has the tab open (the common case -- front desk, a laptop left on the
+// counter) always sees and hears a new booking/signup land without needing to refresh
+// or having ever granted notification permission. Stacks above whatever page is showing.
+function showAdminToast(title, body, onClickGoTo){
+  let root = document.getElementById('admin-toast-root');
+  if(!root){
+    root = document.createElement('div');
+    root.id = 'admin-toast-root';
+    root.style.cssText = 'position:fixed;top:14px;right:14px;left:14px;max-width:360px;margin-left:auto;z-index:900;display:flex;flex-direction:column;gap:10px;pointer-events:none;';
+    document.body.appendChild(root);
+  }
+  const card = document.createElement('div');
+  card.className = 'admin-toast';
+  card.style.cssText = 'pointer-events:auto;cursor:pointer;background:var(--surface);border:1px solid var(--yellow);border-radius:12px;padding:13px 15px;box-shadow:0 10px 26px rgba(0,0,0,.45),0 0 20px rgba(255,122,26,.25);animation:popIn .28s cubic-bezier(.2,.8,.3,1) both;';
+  card.innerHTML = `
+    <div style="display:flex;align-items:flex-start;gap:10px;">
+      <span style="font-size:18px;line-height:1;">🔔</span>
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:700;font-size:13.5px;color:var(--text);">${title}</div>
+        <div style="font-size:12.5px;color:var(--text-dim);margin-top:3px;line-height:1.4;">${body}</div>
+      </div>
+      <button aria-label="Dismiss" style="background:none;border:none;color:var(--text-faint);font-size:15px;padding:0;line-height:1;flex-shrink:0;">✕</button>
+    </div>`;
+  const dismiss = () => { card.style.transition = 'opacity .2s ease, transform .2s ease'; card.style.opacity = '0'; card.style.transform = 'translateY(-6px)'; setTimeout(() => card.remove(), 220); };
+  card.querySelector('button').onclick = (e) => { e.stopPropagation(); dismiss(); };
+  card.onclick = () => {
+    if(onClickGoTo && state.isAdmin) goTo(onClickGoTo);
+    dismiss();
+  };
+  root.appendChild(card);
+  setTimeout(dismiss, 9000);
+}
+
 function notifyAdmin(title, body, onClickGoTo){
+  // In-app sound + toast fire regardless of OS notification permission, as long as an
+  // admin session is actually open in this tab -- this is the alert most admins will
+  // actually see, since it doesn't depend on a permission prompt they may have dismissed.
+  if(state.isAdmin){
+    playAdminAlertSound();
+    showAdminToast(title, body, onClickGoTo);
+  }
+  // Also fire the OS-level Notification when permission was granted, so an admin whose
+  // tab isn't focused (switched away, or the screen is off) still gets alerted.
   if(typeof Notification === 'undefined') return;
   if(Notification.permission !== 'granted') return;
   try{
@@ -3905,7 +4137,7 @@ function vehicleSummaryCardHtml(v){
     <div class="vehicle-summary-card" onclick="toggleVehicleExpand('${v.id}')">
       <div class="vehicle-summary-thumb">${v.photo ? `<img src="${v.photo}" alt="${v.name}">` : 'No photo'}</div>
       <div class="vehicle-summary-info">
-        <div class="vehicle-summary-name">${v.name}${v.hidden ? ' <span style="color:var(--text-dim);font-weight:500;font-size:11px;">(hidden)</span>' : ''}</div>
+        <div class="vehicle-summary-name">${v.name}${v.hidden ? ' <span style="color:var(--text-dim);font-weight:500;font-size:11px;">(hidden)</span>' : ''}${isServiceDue(v) ? ' <span title="Service due">🔧</span>' : ''}</div>
         <div class="vehicle-summary-badges" onclick="event.stopPropagation()">${statusBadge}${markBtn}</div>
       </div>
       <span class="profile-chevron">›</span>
@@ -3988,6 +4220,26 @@ function vehicleCardHtml(v){
             ${v.manualBlockUntil && v.manualBlockUntil.date
               ? `<button class="toggle-btn on danger" onclick="clearManualBlock('${v.id}')">Clear manual "Rented" mark</button>`
               : `<button class="toggle-btn" onclick="toggleManualBlockForm('${v.id}')">${manualBlockDraft === v.id ? 'Cancel' : 'Mark as rented…'}</button>`}
+            <button class="toggle-btn" onclick="openVehicleQr('${v.id}')">🔗 QR code</button>
+          </div>
+          ${serviceDueBadgeHtml(v)}
+          <div class="avcard-fields wide" style="margin-top:14px;">
+            <div class="mini-field">
+              <label>Last service date</label>
+              <input type="date" value="${v.lastServiceDate || ''}" onchange="updateVehicleServiceField('${v.id}','lastServiceDate',this.value)">
+            </div>
+            <div class="mini-field">
+              <label>Odometer at last service (km)</label>
+              <input type="number" value="${v.lastServiceOdo != null ? v.lastServiceOdo : ''}" onchange="updateVehicleServiceField('${v.id}','lastServiceOdo',this.value)">
+            </div>
+            <div class="mini-field">
+              <label>Current odometer (km)</label>
+              <input type="number" value="${v.currentOdo != null ? v.currentOdo : ''}" onchange="updateVehicleServiceField('${v.id}','currentOdo',this.value)">
+            </div>
+            <div class="mini-field">
+              <label>Service interval (km)</label>
+              <input type="number" value="${v.serviceIntervalKm || DEFAULT_SERVICE_INTERVAL_KM}" onchange="updateVehicleServiceField('${v.id}','serviceIntervalKm',this.value)">
+            </div>
           </div>
           ${manualBlockDraft === v.id ? `
           <div class="avcard-fields wide" style="margin-top:10px;">
@@ -4005,6 +4257,56 @@ function vehicleCardHtml(v){
           ` : ''}
         </div>
   `;
+}
+
+/* ============ VEHICLE QR CODE ============
+   Each vehicle gets a QR code linking straight to a quick-book deep link for it
+   (#book-vehicle/<id>) -- stick it on the bike itself so a customer can scan and start
+   booking that exact vehicle instead of hunting for it in the list. The QR image itself
+   is generated by a well-established free public QR API (no API key, no server of our
+   own needed) rather than an in-app encoder, since a subtly wrong hand-rolled QR encoder
+   is a failure mode nobody would notice until a customer's scan silently fails -- if that
+   image ever fails to load, the plain link and "Copy link" button below it still work. */
+function vehicleQrLink(vehicleId){
+  return `${location.origin}${location.pathname}#book-vehicle/${vehicleId}`;
+}
+function vehicleQrImageUrl(vehicleId, size){
+  return `https://api.qrserver.com/v1/create-qr-code/?size=${size||300}x${size||300}&margin=10&data=${encodeURIComponent(vehicleQrLink(vehicleId))}`;
+}
+function openVehicleQr(vehicleId){
+  const v = VEHICLES.find(x => x.id === vehicleId);
+  if(!v) return;
+  const link = vehicleQrLink(vehicleId);
+  const img = vehicleQrImageUrl(vehicleId, 320);
+  let overlay = document.getElementById('vehicleqr-overlay');
+  if(!overlay){
+    overlay = document.createElement('div');
+    overlay.id = 'vehicleqr-overlay';
+    overlay.className = 'doceditor-overlay';
+    document.body.appendChild(overlay);
+  }
+  overlay.innerHTML = `
+    <div class="doceditor-modal" style="text-align:center;">
+      <h3>QR code: ${v.name}</h3>
+      <p class="field-hint" style="margin-bottom:14px;">Print this and stick it on the vehicle. Scanning it opens this vehicle's booking page directly.</p>
+      <div style="background:#fff;border-radius:12px;padding:14px;display:inline-block;">
+        <img src="${img}" alt="QR code for ${v.name}" width="240" height="240" style="display:block;" onerror="this.replaceWith(Object.assign(document.createElement('div'),{textContent:'QR image could not load -- check your internet connection. The link below still works.',style:'width:240px;padding:20px;color:#211F1A;font-size:12.5px;'}));">
+      </div>
+      <div class="field" style="margin-top:14px;text-align:left;">
+        <label>Direct link</label>
+        <input type="text" readonly value="${link}" onclick="this.select();" style="font-size:12px;">
+      </div>
+      <div class="doceditor-row">
+        <a class="btn-ghost" style="flex:1;" href="${img}" download="qr-${(v.name||'vehicle').replace(/\s+/g,'-')}.png" target="_blank" rel="noopener">⬇ Download QR</a>
+        <button class="btn-ghost" style="flex:1;" onclick="navigator.clipboard && navigator.clipboard.writeText('${link}').then(()=>alert('Link copied.')).catch(()=>alert('Could not copy -- select and copy the link above instead.'))">📋 Copy link</button>
+      </div>
+      <button class="btn-primary" style="margin-top:14px;" onclick="closeVehicleQr()">Done</button>
+    </div>
+  `;
+}
+function closeVehicleQr(){
+  const el = document.getElementById('vehicleqr-overlay');
+  if(el) el.remove();
 }
 
 function toggleManualBlockForm(vehicleId){
@@ -4095,7 +4397,7 @@ function customerCardHtml(c){
       <div class="profile-card" onclick="toggleCustomerExpand('${c.id}')">
         <div class="profile-avatar">${avatarHtml}</div>
         <div class="profile-info">
-          <div class="profile-name">${c.name || 'Unnamed'}</div>
+          <div class="profile-name">${c.flagged ? `<span title="Flagged: ${(c.flagReason||'').replace(/"/g,'&quot;')}" style="color:#F3A19C;">🚩</span> ` : ''}${c.name || 'Unnamed'}</div>
           <div class="profile-mobile">${c.mobile || 'No mobile on file'}</div>
           <div class="field-hint" style="margin-top:2px;">${c.createdAt ? `Joined ${fmtDate(c.createdAt.slice(0,10))}${c.addedByAdmin ? ' · added by admin' : ''}` : ''}</div>
         </div>
@@ -4112,6 +4414,10 @@ function customerCardHtml(c){
   return `
     <div class="ccard">
       <button class="ccard-collapse" onclick="toggleCustomerExpand('${c.id}')">‹ Back to profile</button>
+      ${c.flagged ? `
+      <div style="background:#3A1717;border:1px solid #5A2A26;color:#F3A19C;border-radius:10px;padding:11px 13px;margin-bottom:14px;font-size:12.5px;line-height:1.5;">
+        <strong>🚩 Flagged:</strong> ${c.flagReason || 'No reason given'}${c.flaggedAt ? ` <span style="color:var(--text-faint);">(${fmtDate(c.flaggedAt.slice(0,10))})</span>` : ''}
+      </div>` : ''}
       <div class="ccard-top">
         <div style="flex:1;min-width:0;">
           <div class="mini-field" style="margin-bottom:8px;">
@@ -4157,6 +4463,7 @@ function customerCardHtml(c){
         <button class="toggle-btn ${verificationStatusOf(c)==='verified' ? 'on' : ''}" onclick="setCustomerVerification('${c.id}','verified')">✓ Mark verified</button>
         <button class="toggle-btn ${verificationStatusOf(c)==='unverified' ? 'on danger' : ''}" onclick="setCustomerVerification('${c.id}','unverified')">✕ Mark unverified</button>
         <button class="btn-ghost" onclick="downloadCustomerPDF('${c.id}')">Download PDF</button>
+        <button class="btn-ghost" style="color:#F3A19C;border-color:#5A2A26;" onclick="toggleCustomerFlag('${c.id}')">${c.flagged ? '🚩 Remove flag' : '🚩 Flag customer'}</button>
         <button class="btn-ghost" style="color:#F3A19C;border-color:#5A2A26;" onclick="deleteCustomer('${c.id}')">🗑 Delete customer</button>
       </div>
     </div>
@@ -4445,6 +4752,7 @@ function bookingCardHtml(bk){
         <button class="btn-ghost" onclick="sendCustomerNotification('${bk.id}','return')">🔔 Remind to return</button>
         <button class="btn-ghost" onclick="sendCustomerNotification('${bk.id}','extension')">📅 Ask about extension</button>
         <button class="btn-ghost" onclick="sendInvoiceOnWhatsapp('${bk.id}', 'booking')">🧾 Send invoice</button>
+        ${bk.customerMobile ? `<button class="btn-ghost" onclick="shareBookingStatusLink('${bk.id}')">🔗 Share status link</button>` : ''}
         <button class="btn-ghost" style="background:var(--teal);color:#0B1615;border-color:var(--teal);" onclick="toggleExtendForm('${bk.id}')">🕒 ${extendDraft && extendDraft.bookingId===bk.id ? 'Cancel extend' : 'Extend rental'}</button>
         ${bk.returnedAt
           ? `<button class="btn-ghost" style="color:#7EE2B8;border-color:#123A28;" onclick="markBookingReturned('${bk.id}', false)">↩ Marked returned ${fmtDate(bk.returnedAt.slice(0,10))} — undo</button>`
@@ -4525,7 +4833,7 @@ function newBookingCustomerOptionsHtml(){
     (c.email || '').toLowerCase().includes(q)
   );
   const placeholder = `<option value="">${list.length ? 'Select a customer…' : 'No matching customers'}</option>`;
-  return placeholder + list.map(c => `<option value="${c.id}" ${newBookingDraft.customerId===c.id?'selected':''}>${c.name} — ${c.mobile}</option>`).join('');
+  return placeholder + list.map(c => `<option value="${c.id}" ${newBookingDraft.customerId===c.id?'selected':''}>${c.flagged ? '🚩 ' : ''}${c.name} — ${c.mobile}</option>`).join('');
 }
 function filterNewBookingCustomers(val){
   newBookingCustomerSearch = val;
@@ -4559,6 +4867,10 @@ function renderNewBookingFormHtml(){
           ${newBookingCustomerOptionsHtml()}
         </select>
         ${selectedCustomer ? `<div class="field-hint" style="margin-top:6px;">Selected: <strong style="color:var(--text);">${selectedCustomer.name}</strong> — ${selectedCustomer.mobile}</div>` : ''}
+        ${selectedCustomer && selectedCustomer.flagged ? `
+        <div style="background:#3A1717;border:1px solid #5A2A26;color:#F3A19C;border-radius:10px;padding:11px 13px;margin-top:8px;font-size:12.5px;line-height:1.5;">
+          <strong>🚩 This customer is flagged:</strong> ${selectedCustomer.flagReason || 'No reason given'}. Review before booking them in.
+        </div>` : ''}
       </div>
       <div class="field" style="margin-bottom:8px;">
         <label>Vehicle *</label>
@@ -4671,6 +4983,8 @@ function saveNewBooking(){
   const vehicle = VEHICLES.find(v => v.id === d.vehicleId);
   if(!customer){ showErr('Please select a customer.'); return; }
   if(!vehicle){ showErr('Please select a vehicle.'); return; }
+  if(customer.flagged && !confirm(`🚩 "${customer.name}" is flagged: ${customer.flagReason || 'no reason given'}.\n\nBook them in anyway?`)) return;
+  if(isServiceDue(vehicle) && !confirm(`🔧 "${vehicle.name}" is overdue for service.\n\nRent it out anyway?`)) return;
   const plan = planForDates(d.pickupDate, d.pickupTime, d.dropDate, d.dropTime);
   if(plan.totalHours <= 0){ showErr('Please enter a valid pickup and drop-off date/time (drop-off must be after pickup).'); return; }
   const conflicts = vehicleConflictingBookings(vehicle.id, d.pickupDate, d.pickupTime, d.dropDate, d.dropTime);
@@ -5112,7 +5426,7 @@ function downloadIncomeReportPDF(){
     const pageH = doc.internal.pageSize.getHeight();
     const margin = 40;
     let y = 50;
-    const TEAL = [49, 182, 164], DARK = [30,34,34];
+    const TEAL = [57, 212, 90], DARK = [30,34,34];
 
     const range = dashboardPeriodRange(state.dashboardPeriod, state.dashboardFrom, state.dashboardTo);
     const bookings = bookingsInDateRange(range.from, range.to);
@@ -5130,7 +5444,7 @@ function downloadIncomeReportPDF(){
     doc.setFont('helvetica','normal'); doc.setFontSize(10);
     doc.text(`Period: ${periodLabel} (${fmtDate(range.from)} - ${fmtDate(range.to)})    Generated: ${fmtDate(todayStr())}`, margin, y);
     y += 24;
-    doc.setDrawColor(245,194,27); doc.setLineWidth(2); doc.line(margin, y, pageW - margin, y); doc.setLineWidth(1);
+    doc.setDrawColor(255,122,26); doc.setLineWidth(2); doc.line(margin, y, pageW - margin, y); doc.setLineWidth(1);
     y += 26;
 
     doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.setTextColor(...TEAL);
@@ -5331,6 +5645,78 @@ function sendCustomerNotification(bookingId, type){
   }
 }
 
+// A public, read-only booking status page -- no login needed -- linked as
+// #status/<bookingId> so it can be sent straight over WhatsApp. Deliberately kept to
+// info a customer would call to ask for anyway (vehicle, times, amount due, whether it's
+// overdue) rather than anything sensitive like documents or full payment details.
+function renderBookingStatusPage(bookingId){
+  const appEl = document.getElementById('app');
+  const bk = BOOKINGS.find(b => b.id === bookingId);
+  if(!bk){
+    appEl.innerHTML = `
+      <div class="wrap page">
+        <div class="empty">
+          <h3>Booking not found</h3>
+          <p>This link may be out of date. Please contact us for help.</p>
+          <div style="margin-top:18px;display:flex;gap:10px;justify-content:center;">
+            <a class="btn-ghost" href="tel:+918982008803">📞 Call us</a>
+            <a class="btn-ghost" style="background:var(--whatsapp);color:#fff;border-color:var(--whatsapp);" href="https://wa.me/918982008803" target="_blank" rel="noopener">💬 WhatsApp us</a>
+          </div>
+        </div>
+      </div>`;
+    return;
+  }
+  const now = new Date();
+  const dropAt = new Date(bk.dropDate + 'T' + bk.dropTime);
+  const isOverdue = !bk.returnedAt && !bk.cancelled && now > dropAt;
+  const statusLabel = bk.cancelled ? 'Cancelled' : bk.returnedAt ? 'Completed' : isOverdue ? 'Overdue' : 'Active';
+  const statusColor = bk.cancelled ? 'var(--text-faint)' : bk.returnedAt ? 'var(--teal)' : isOverdue ? '#F3A19C' : 'var(--yellow)';
+  const amountDue = bk.paidOnline ? 0 : (bk.rentalTotal || 0);
+  appEl.innerHTML = `
+    <div class="wrap page">
+      <h1 style="font-size:22px;margin-bottom:4px;">Booking status</h1>
+      <p class="lead" style="margin-bottom:20px;">${bookingDisplayNumber(bk.id)} · ${bk.customerName || ''}</p>
+
+      <div class="ticket">
+        <div class="ticket-head">
+          <div>
+            <h3>${bk.vehicleName}${bk.vehicleColour ? ` (${bk.vehicleColour})` : ''}</h3>
+            <div class="sub">${bk.durationLabel || ''} · ${bk.kmLabel || ''}</div>
+          </div>
+          <span class="status-pill" style="background:transparent;border:1.5px solid ${statusColor};color:${statusColor};">${statusLabel}</span>
+        </div>
+        ${isOverdue ? `<div style="background:#3A1717;border:1px solid #5A2A26;color:#F3A19C;border-radius:10px;padding:11px 13px;margin-bottom:14px;font-size:12.5px;line-height:1.5;">⚠ This rental is past its drop-off time. Please return the vehicle as soon as possible, or contact us to extend.</div>` : ''}
+        <div class="ticket-row"><span>Pickup</span><strong>${fmtDate(bk.pickupDate)}, ${fmtTime(bk.pickupTime)}</strong></div>
+        <div class="ticket-row"><span>Drop-off</span><strong>${fmtDate(bk.dropDate)}, ${fmtTime(bk.dropTime)}</strong></div>
+        ${bk.returnedAt ? `<div class="ticket-row"><span>Returned</span><strong>${fmtDate(bk.returnedAt.slice(0,10))}, ${fmtTime(bk.returnedAt.slice(11,16))}</strong></div>` : ''}
+        <div class="ticket-divider"></div>
+        <div class="ticket-row"><span>Deposit (refundable)</span><strong>${money(bk.deposit||0)}</strong></div>
+        <div class="ticket-total">
+          <span>${amountDue === 0 ? 'Amount due' : 'Amount due at pickup/drop-off'}</span>
+          <span class="amt">${amountDue === 0 ? 'Paid online ✓' : money(amountDue)}</span>
+        </div>
+      </div>
+
+      <p class="field-hint" style="margin-bottom:18px;">Questions about this booking? Reach out any time.</p>
+      <div style="display:flex;gap:10px;">
+        <a class="btn-ghost" style="flex:1;text-align:center;" href="tel:+918982008803">📞 Call us</a>
+        <a class="btn-ghost" style="flex:1;text-align:center;background:var(--whatsapp);color:#fff;border-color:var(--whatsapp);" href="https://wa.me/918982008803" target="_blank" rel="noopener">💬 WhatsApp us</a>
+      </div>
+    </div>`;
+}
+
+// Builds the shareable #status/<id> link for a booking and opens WhatsApp with it
+// pre-filled, so admin can send it to the customer in one tap.
+function shareBookingStatusLink(id){
+  const bk = BOOKINGS.find(x => x.id === id);
+  if(!bk) return;
+  if(!bk.customerMobile){ alert('This customer has no mobile number on file -- add one to their profile first.'); return; }
+  const link = `${location.origin}${location.pathname}#status/${bk.id}`;
+  const msg = `*24x7 Bike4U Bike Rentals*\nTrack your booking (${bookingDisplayNumber(bk.id)}) here any time:\n${link}`;
+  const num = bk.customerMobile.replace(/\D/g,'');
+  window.open(`https://wa.me/91${num}?text=${encodeURIComponent(msg)}`, '_blank');
+}
+
 function shareBookingOnWhatsapp(id){
   const bk = BOOKINGS.find(x => x.id === id);
   if(!bk){ return; }
@@ -5387,8 +5773,8 @@ function generateBookingAgreementPDF(id){
   let y = 50;
 
   // Brand colours (match the app's yellow/teal palette).
-  const YELLOW = [245, 194, 27];
-  const TEAL = [49, 182, 164];
+  const YELLOW = [255, 122, 26];
+  const TEAL = [57, 212, 90];
   const DARK = [30, 34, 34];
 
   // Logo (top-left) + brand-coloured title.
@@ -5535,8 +5921,8 @@ function generateInvoicePDF(id, kind, extension){
   const pageW = doc.internal.pageSize.getWidth();
   const margin = 40;
   let y = 50;
-  const YELLOW = [245, 194, 27];
-  const TEAL = [49, 182, 164];
+  const YELLOW = [255, 122, 26];
+  const TEAL = [57, 212, 90];
   const DARK = [30, 34, 34];
 
   try{ doc.addImage(LOGO_BASE64, 'PNG', margin, y - 26, 34, 34); }catch(e){}
@@ -6145,6 +6531,45 @@ function updateField(id, field, val){
   const n = parseFloat(val);
   if(!isNaN(n) && n >= 0){ v[field] = n; saveVehicles(v); }
 }
+
+/* ============ VEHICLE SERVICE LOG ============
+   Tracks when a vehicle was last serviced and its odometer, so a bike that's overdue for
+   maintenance shows a clear warning in admin instead of relying on someone remembering. */
+const DEFAULT_SERVICE_INTERVAL_KM = 3000;
+function updateVehicleServiceField(id, field, val){
+  const v = VEHICLES.find(x => x.id === id);
+  if(!v) return;
+  if(field === 'lastServiceDate'){
+    v.lastServiceDate = val || null;
+  } else {
+    const n = parseFloat(val);
+    v[field] = (val === '' || isNaN(n)) ? null : Math.max(0, n);
+  }
+  saveVehicles(v);
+  renderAdmin();
+}
+// Service is due either by distance (current odometer has gone past last-service-odometer
+// + interval) or, as a fallback for vehicles admin isn't diligently logging odometer for,
+// by time (over 90 days since the last logged service) -- so a bike that's barely driven
+// but sitting unserviced for months still gets flagged.
+function isServiceDue(v){
+  if(v.currentOdo != null && v.lastServiceOdo != null){
+    const interval = v.serviceIntervalKm || DEFAULT_SERVICE_INTERVAL_KM;
+    if(v.currentOdo - v.lastServiceOdo >= interval) return true;
+  }
+  if(v.lastServiceDate){
+    const daysSince = (Date.now() - new Date(v.lastServiceDate).getTime()) / 86400000;
+    if(daysSince >= 90) return true;
+  }
+  return false;
+}
+function serviceDueBadgeHtml(v){
+  if(!isServiceDue(v)) return '';
+  const kmOver = (v.currentOdo != null && v.lastServiceOdo != null) ? Math.max(0, v.currentOdo - v.lastServiceOdo - (v.serviceIntervalKm || DEFAULT_SERVICE_INTERVAL_KM)) : null;
+  return `<div style="background:#3A1717;border:1px solid #5A2A26;color:#F3A19C;border-radius:10px;padding:11px 13px;margin-top:14px;font-size:12.5px;line-height:1.5;">
+    🔧 <strong>Service due</strong>${kmOver != null ? ` — ${Math.round(kmOver)} km past its ${v.serviceIntervalKm || DEFAULT_SERVICE_INTERVAL_KM} km interval` : ' (based on time since last logged service)'}. Consider servicing before the next rental.
+  </div>`;
+}
 function toggleHidden(id){
   const v = VEHICLES.find(x => x.id === id);
   v.hidden = !v.hidden;
@@ -6275,12 +6700,27 @@ function goTo(page){
 }
 window.addEventListener('hashchange', function(){
   const p = location.hash.slice(1);
+  // Both of these are standalone, id-carrying routes -- not part of VALID_PAGES/state.page
+  // -- so they're just re-rendered directly; render() itself resolves the id from the hash.
+  if(p && (p.startsWith('status/') || p.startsWith('book-vehicle/'))){ render(); return; }
   if(p && VALID_PAGES.includes(p) && p !== state.page){
     state.page = p;
     render();
   }
 });
 function render(){
+  // Public "share this link" pages short-circuit the normal page router entirely -- they
+  // need no login and don't touch state.page, so a customer opening one mid-session (or
+  // an admin tab re-rendering in the background) never gets bounced off it.
+  const hashNow = location.hash.slice(1);
+  if(hashNow.startsWith('status/')){
+    renderBookingStatusPage(hashNow.slice('status/'.length));
+    return;
+  }
+  if(hashNow.startsWith('book-vehicle/')){
+    renderVehicleDetailPage(hashNow.slice('book-vehicle/'.length));
+    return;
+  }
   applyAnimGuard();
   if(state.page !== 'home' && (tourActive || document.getElementById('tour-tooltip'))){
     tourActive = false;
@@ -6409,13 +6849,20 @@ function restartTour(){
   restoreCustomerSession();
   restoreAdminSession();
   const initialHash = location.hash.slice(1);
-  if(initialHash && VALID_PAGES.includes(initialHash)){
+  if(initialHash && (initialHash.startsWith('status/') || initialHash.startsWith('book-vehicle/'))){
+    // Public standalone links: leave the hash exactly as shared, and don't touch
+    // state.page -- render() below resolves these routes directly from the hash.
+  } else if(initialHash && VALID_PAGES.includes(initialHash)){
     state.page = initialHash;
   } else {
     location.hash = state.page;
   }
   render();
-  syncFromSupabase();
+  // BOOKINGS/VEHICLES may still be empty (or just local defaults) on a fresh device until
+  // the first sync lands -- both standalone routes need their own re-render once real data
+  // arrives, since nothing else on those entry points would otherwise trigger one.
+  const firstSync = syncFromSupabase();
+  if(initialHash && (initialHash.startsWith('status/') || initialHash.startsWith('book-vehicle/'))) firstSync.then(() => render());
   // A few staggered attempts shortly after cover the case where the first one ran before
   // the Supabase library had actually finished loading from its CDN (getSupabase's own
   // retry fix, plus loading both CDN sources in parallel above, both help too -- this adds
