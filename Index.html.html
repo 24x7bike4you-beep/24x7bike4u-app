@@ -1686,6 +1686,10 @@ function fmtTime(t){
   return `${h12}:${m} ${ampm}`;
 }
 function money(n){ return '₹' + Math.round(n).toLocaleString('en-IN'); }
+// PDFs are drawn with jsPDF's built-in Helvetica font, which has no glyph for the ₹ sign --
+// it prints as a blank box there even though the same character shows fine in the app/WhatsApp.
+// Use "Rs." instead of ₹ specifically inside PDF text so the amount is never missing its currency mark.
+function moneyPdf(n){ return 'Rs. ' + Math.round(n).toLocaleString('en-IN'); }
 
 // Guards periodic/background refreshes (the 60s poll, realtime pushes) from interrupting
 // someone actively typing into a field or open form -- rebuilding the whole page out from
@@ -5448,7 +5452,7 @@ function downloadIncomeReportPDF(){
     y += 26;
 
     doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.setTextColor(...TEAL);
-    doc.text(`Total income: ${money(total)}`, margin, y);
+    doc.text(`Total income: ${moneyPdf(total)}`, margin, y);
     doc.setTextColor(...DARK); doc.setFontSize(11); doc.setFont('helvetica','normal');
     doc.text(`${bookings.length} booking${bookings.length===1?'':'s'} counted (cancelled bookings excluded)`, margin, y + 18);
     y += 44;
@@ -5466,7 +5470,7 @@ function downloadIncomeReportPDF(){
       doc.setFont('helvetica','normal'); doc.setTextColor(90);
       doc.text(`${v.count} booking${v.count===1?'':'s'}`, margin + 220, y);
       doc.setFont('helvetica','bold'); doc.setTextColor(...TEAL);
-      doc.text(money(v.income), pageW - margin - 70, y);
+      doc.text(moneyPdf(v.income), pageW - margin - 70, y);
       y += 18;
     });
     if(vIncome.length === 0){
@@ -5814,10 +5818,10 @@ function generateBookingAgreementPDF(id){
     ['Drop-off', `${fmtDate(bk.dropDate)}, ${fmtTime(bk.dropTime)}`],
     ['Duration', bk.durationLabel],
     ['Kilometres', bk.kmLabel],
-    ...(bk.couponCode ? [['Coupon applied', `${bk.couponCode} (-${money(bk.couponDiscount)})`]] : []),
-    ['Rental total', money(bk.rentalTotal)],
-    ['Deposit (refundable)', money(bk.deposit)],
-    ['Extra km charge', `₹${bk.extraKmCharge}/km`],
+    ...(bk.couponCode ? [['Coupon applied', `${bk.couponCode} (-${moneyPdf(bk.couponDiscount)})`]] : []),
+    ['Rental total', moneyPdf(bk.rentalTotal)],
+    ['Deposit (refundable)', moneyPdf(bk.deposit)],
+    ['Extra km charge', `Rs. ${bk.extraKmCharge}/km`],
     ['Payment method', bk.paymentMethod],
     ...(bk.razorpayPaymentId ? [['Razorpay payment ID', bk.razorpayPaymentId]] : []),
   ];
@@ -5901,15 +5905,15 @@ function invoiceLineItems(bk, extension){
   const items = [];
   const baseRent = bk.rentalTotal - (bk.pickupCharge||0) - (bk.dropCharge||0) - (bk.helmetCharge||0) + (bk.discountAmount||0) + (bk.couponDiscount||0)
     - (bk.extensions || []).reduce((s,e) => s + (e.charge||0), 0);
-  items.push(['Rent', bk.kmLabel, money(baseRent)]);
-  if(bk.pickupCharge) items.push(['Pickup charge', '', money(bk.pickupCharge)]);
-  if(bk.dropCharge) items.push(['Drop-off charge', '', money(bk.dropCharge)]);
-  if(bk.helmetCharge) items.push(['Extra helmet', '', money(bk.helmetCharge)]);
+  items.push(['Rent', bk.kmLabel, moneyPdf(baseRent)]);
+  if(bk.pickupCharge) items.push(['Pickup charge', '', moneyPdf(bk.pickupCharge)]);
+  if(bk.dropCharge) items.push(['Drop-off charge', '', moneyPdf(bk.dropCharge)]);
+  if(bk.helmetCharge) items.push(['Extra helmet', '', moneyPdf(bk.helmetCharge)]);
   (bk.extensions || []).forEach((e, i) => {
-    if(e.charge) items.push([`Extension ${i+1}`, `to ${fmtDate(e.toDate)}, ${fmtTime(e.toTime)}`, money(e.charge)]);
+    if(e.charge) items.push([`Extension ${i+1}`, `to ${fmtDate(e.toDate)}, ${fmtTime(e.toTime)}`, moneyPdf(e.charge)]);
   });
-  if(bk.couponCode) items.push([`Coupon (${bk.couponCode})`, '', `-${money(bk.couponDiscount)}`]);
-  if(bk.discountAmount) items.push(['Discount', bk.discountType === 'percent' ? `${bk.discountValue}%` : '', `-${money(bk.discountAmount)}`]);
+  if(bk.couponCode) items.push([`Coupon (${bk.couponCode})`, '', `-${moneyPdf(bk.couponDiscount)}`]);
+  if(bk.discountAmount) items.push(['Discount', bk.discountType === 'percent' ? `${bk.discountValue}%` : '', `-${moneyPdf(bk.discountAmount)}`]);
   return items;
 }
 
@@ -5972,7 +5976,7 @@ function generateInvoicePDF(id, kind, extension){
     y += 17;
   });
   doc.text('Deposit (refundable)', margin, y);
-  doc.text(money(bk.deposit), pageW - margin - 70, y);
+  doc.text(moneyPdf(bk.deposit), pageW - margin - 70, y);
   y += 10;
 
   y += 10;
@@ -5980,7 +5984,7 @@ function generateInvoicePDF(id, kind, extension){
   y += 22;
   doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(...TEAL);
   doc.text('Total (rent + charges)', margin, y);
-  doc.text(money(bk.rentalTotal), pageW - margin - 70, y);
+  doc.text(moneyPdf(bk.rentalTotal), pageW - margin - 70, y);
   doc.setTextColor(0,0,0);
   y += 22;
   doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(120);
