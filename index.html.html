@@ -1003,7 +1003,21 @@ async function syncFromSupabase(){
   }
 
   checkOverdueBookings();
+  // This is a background data refresh (fires immediately on page load, then again on a
+  // few delayed retries, then every ~60s, then on every realtime push), not a real
+  // navigation -- so it must not replay the page's entrance animation the way a genuine
+  // navigation should. Without this, a brand new visitor would see the whole page visibly
+  // fade/slide in again several times in the first few seconds (once as soon as the very
+  // first sync landed, then again at ~2s, ~5s and ~9s), which is exactly what reads as the
+  // page "flickering" right after it opens. silentRefreshFlag already does exactly this
+  // suppression for the admin screen's own background refreshes (see applyAnimGuard) --
+  // this just makes every render() reached through a sync, on any page, go through the
+  // same guard, restoring whatever the flag was before rather than assuming false, so this
+  // never fights an outer silentRefresh() that may already be wrapping this call.
+  const wasSilent = silentRefreshFlag;
+  silentRefreshFlag = true;
   render();
+  silentRefreshFlag = wasSilent;
 }
 
 /* ============ PERSISTENCE (fleet data cached in this browser, synced via Supabase) ============ */
@@ -1141,6 +1155,97 @@ async function sbDeleteCustomerRow(id){
     if(result.error){ console.warn('Bike4u: customer row delete failed for', id, '--', (result.error && result.error.message) || result.error); return false; }
     return true;
   }catch(e){ console.warn('Bike4u: sbDeleteCustomerRow failed for', id, e); return false; }
+}
+
+/* ============ VISITOR ANALYTICS (how many people opened the site each day) ============
+   Same one-row-per-record trick as customer rows above, for the same reason: naively
+   keeping one shared "visit count" value would mean every single page load has to read
+   the whole counter, add one, and write it back -- and two people opening the site in the
+   same second would race on that read-modify-write and silently undercount each other. A
+   visit here instead writes only its own row (key = 'visit_<date>_<deviceId>'), so visits
+   from different people/devices never touch the same key and can never clash. Writing at
+   most one row per device per calendar day (not one per page load) also keeps the total
+   number of rows this creates bounded to roughly devices x days, not devices x pageviews. */
+const VISIT_ROW_PREFIX = 'visit_';
+const VISITOR_ID_KEY = 'bike4u_visitor_id';
+const LAST_VISIT_LOGGED_KEY = 'bike4u_last_visit_logged_date';
+
+function getOrCreateVisitorId(){
+  try{
+    let id = localStorage.getItem(VISITOR_ID_KEY);
+    if(!id){
+      id = 'v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+      localStorage.setItem(VISITOR_ID_KEY, id);
+    }
+    return id;
+  }catch(e){
+    return 'anon' + Math.random().toString(36).slice(2, 10); // storage blocked (private mode etc) -- this visit still counts, just won't be recognized as the same visitor again
+  }
+}
+
+// Called once at app boot. Deliberately skipped for admin use of the app (state.isAdmin),
+// so the business owner checking their own site doesn't inflate their own visitor count.
+function logVisitIfNeeded(){
+  if(state.isAdmin) return;
+  try{
+    const today = dateOnlyStr(new Date());
+    if(localStorage.getItem(LAST_VISIT_LOGGED_KEY) === today) return;
+    const visitorId = getOrCreateVisitorId();
+    sbSet(VISIT_ROW_PREFIX + today + '_' + visitorId, { date: today, visitorId, at: new Date().toISOString() })
+      .then(ok => { if(ok){ try{ localStorage.setItem(LAST_VISIT_LOGGED_KEY, today); }catch(e){} } });
+      // if this fails (offline, etc.) the localStorage flag is deliberately left unset, so
+      // the next page load this same day simply tries again rather than losing the visit
+  }catch(e){ /* analytics is best-effort and must never block or break the app */ }
+}
+
+async function sbGetAllVisitRows(){
+  const client = await getSupabase();
+  if(!client) return null;
+  try{
+    const result = await withTimeout(
+      client.from('app_data').select('value').like('key', VISIT_ROW_PREFIX + '%'),
+      10000,
+      { data: null, error: 'timeout' }
+    );
+    if(result.error){ console.warn('Bike4u: could not load visit rows --', (result.error && result.error.message) || result.error); return null; }
+    return (result.data || []).map(r => r.value).filter(Boolean);
+  }catch(e){ console.warn('Bike4u: sbGetAllVisitRows failed', e); return null; }
+}
+async function sbDeleteVisitRowsBefore(cutoffDateStr){
+  const client = await getSupabase();
+  if(!client) return false;
+  try{
+    // Old rows are named 'visit_<date>_<id>', and dates sort lexically the same as
+    // chronologically (YYYY-MM-DD), so a plain string range delete works directly on the
+    // key without needing to fetch every row first to check its date.
+    const result = await withTimeout(
+      client.from('app_data').delete().like('key', VISIT_ROW_PREFIX + '%').lt('key', VISIT_ROW_PREFIX + cutoffDateStr),
+      15000,
+      { error: 'timeout' }
+    );
+    if(result.error){ console.warn('Bike4u: visit row cleanup failed --', (result.error && result.error.message) || result.error); return false; }
+    return true;
+  }catch(e){ console.warn('Bike4u: sbDeleteVisitRowsBefore failed', e); return false; }
+}
+
+// Loaded on demand (only once the admin actually opens the Dashboard tab) rather than as
+// part of the constant background sync cycle, since visitor counts aren't needed for any
+// booking logic and don't need to be kept live-fresh the way bookings/customers do.
+let VISIT_ROWS = null; // null = not loaded yet; [] = loaded, no visits recorded
+let visitRowsLoading = false;
+function ensureVisitRowsLoaded(){
+  if(VISIT_ROWS !== null || visitRowsLoading) return;
+  visitRowsLoading = true;
+  sbGetAllVisitRows().then(rows => {
+    VISIT_ROWS = rows || [];
+    visitRowsLoading = false;
+    if(state.isAdmin && state.page === 'admin' && state.adminTab === 'dashboard') renderAdmin();
+  });
+}
+function refreshVisitRows(){
+  VISIT_ROWS = null;
+  ensureVisitRowsLoaded();
+  renderAdmin();
 }
 
 // Mirrors the per-row cloud fix above, on the local-storage side: previously every save
@@ -5463,6 +5568,36 @@ function incomeBuckets(bookings, from, to){
   return { granularity, data: keys.map(k => ({ key: k, label: labelFor(k), amount: buckets[k] })) };
 }
 
+// Same adaptive day/month/year bucketing as incomeBuckets, but counting visit rows
+// (each row is already exactly one unique visitor on one day, by construction) instead of
+// summing booking amounts.
+function visitorBuckets(rows, from, to){
+  const toForSpan = to > dateOnlyStr(new Date()) ? dateOnlyStr(new Date()) : to;
+  const spanDays = Math.max(1, Math.round((new Date(toForSpan) - new Date(from)) / 86400000) + 1);
+  const granularity = spanDays > 730 ? 'year' : spanDays > 60 ? 'month' : 'day';
+  const buckets = {};
+  rows.filter(r => r.date >= from && r.date <= to).forEach(r => {
+    const key = granularity === 'day' ? r.date : granularity === 'month' ? r.date.slice(0,7) : r.date.slice(0,4);
+    buckets[key] = (buckets[key] || 0) + 1;
+  });
+  const keys = Object.keys(buckets).sort();
+  const labelFor = k => {
+    if(granularity === 'day') return fmtDate(k).replace(/, \d{4}$/, '');
+    if(granularity === 'month'){ const [y,m] = k.split('-'); return new Date(+y, +m-1, 1).toLocaleDateString('en-IN', {month:'short', year:'2-digit'}); }
+    return k;
+  };
+  return { granularity, data: keys.map(k => ({ key: k, label: labelFor(k), count: buckets[k] })) };
+}
+
+function clearOldVisitData(){
+  if(!confirm('Clear visitor analytics older than 180 days? This only removes old day-by-day visit counts -- it never touches bookings, customers or vehicles, and cannot be undone.')) return;
+  const cutoff = dateOnlyStr(new Date(Date.now() - 180*86400000));
+  sbDeleteVisitRowsBefore(cutoff).then(ok => {
+    if(ok){ VISIT_ROWS = null; ensureVisitRowsLoaded(); showAdminToast('Cleared', 'Old visitor data removed.'); }
+    else alert('Could not reach the server to clear old visitor data. Please try again.');
+  });
+}
+
 function setDashboardPeriod(period){
   state.dashboardPeriod = period;
   renderAdmin();
@@ -5473,6 +5608,7 @@ function updateDashboardCustomRange(field, val){
 }
 
 function renderDashboardAdminHtml(){
+  ensureVisitRowsLoaded();
   const range = dashboardPeriodRange(state.dashboardPeriod, state.dashboardFrom, state.dashboardTo);
   const bookings = bookingsInDateRange(range.from, range.to);
   const total = bookings.reduce((s, bk) => s + (bk.rentalTotal || 0), 0);
@@ -5482,6 +5618,16 @@ function renderDashboardAdminHtml(){
   const vIncome = vehicleWiseIncome(bookings);
   const maxV = Math.max(1, ...vIncome.map(v => v.income));
   const cancelledCount = BOOKINGS.filter(bk => bk.cancelled).length;
+
+  const visitRows = VISIT_ROWS || [];
+  const todayStr_ = dateOnlyStr(new Date());
+  const visitorsToday = visitRows.filter(r => r.date === todayStr_).length;
+  const vRange = dashboardPeriodRange(state.dashboardPeriod, state.dashboardFrom, state.dashboardTo);
+  const visitorsInRange = visitRows.filter(r => r.date >= vRange.from && r.date <= vRange.to).length;
+  const vBuckets = visitorBuckets(visitRows, vRange.from, vRange.to);
+  const maxVBucket = Math.max(1, ...vBuckets.data.map(b => b.count));
+  const daysInRange = Math.max(1, vBuckets.data.length);
+  const avgVisitorsPerDay = vBuckets.granularity === 'day' ? (visitorsInRange / daysInRange) : null;
 
   return `
     <div class="dash-period">
@@ -5529,7 +5675,31 @@ function renderDashboardAdminHtml(){
       `).join('')}
     </div>
 
-    <div class="card" style="margin-top:18px;border-color:var(--red);">
+    <div class="card" style="margin-top:18px;margin-bottom:18px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+        <div class="form-section-title" style="margin-bottom:0;">Visitor analytics</div>
+        <button class="btn-ghost" onclick="refreshVisitRows()" title="Reload visitor data from the server">↻ Refresh</button>
+      </div>
+      ${VISIT_ROWS === null ? `<p class="field-hint">Loading visitor data…</p>` : `
+      <div class="dash-cards" style="margin-bottom:16px;">
+        <div class="dash-card"><div class="lbl">Today</div><div class="amt" style="color:var(--text);">${visitorsToday}</div><div class="sub">unique visitor${visitorsToday===1?'':'s'} so far</div></div>
+        <div class="dash-card"><div class="lbl">Visitors</div><div class="amt" style="color:var(--text);">${visitorsInRange}</div><div class="sub">${fmtDate(vRange.from)} – ${fmtDate(vRange.to)}</div></div>
+        ${avgVisitorsPerDay != null ? `<div class="dash-card"><div class="lbl">Avg / day</div><div class="amt" style="color:var(--text);">${avgVisitorsPerDay.toFixed(1)}</div></div>` : ''}
+      </div>
+      ${vBuckets.data.length === 0 ? `<p class="field-hint">No visits recorded in this period yet.</p>` : `
+      <div class="dash-chart">
+        ${vBuckets.data.map(b => `
+          <div class="dash-bar-col" title="${b.label}: ${b.count} visitor${b.count===1?'':'s'}">
+            <div class="dash-bar" style="height:${Math.max(2, Math.round(b.count / maxVBucket * 100))}%;background:linear-gradient(180deg,var(--yellow-light) 0%,var(--yellow) 100%);"></div>
+            <div class="dash-bar-label">${b.label}</div>
+          </div>
+        `).join('')}
+      </div>`}
+      <p class="field-hint" style="margin-top:14px;margin-bottom:0;">Counts each device/browser once per day it opens the site (not every page view), and never counts admin use of this panel. <a href="#" onclick="clearOldVisitData();return false;" style="color:var(--text-dim);">Clear data older than 180 days</a></p>
+      `}
+    </div>
+
+    <div class="card" style="border-color:var(--red);">
       <div class="form-section-title" style="margin-bottom:6px;color:#F3A19C;">⚠️ Danger zone</div>
       <p class="field-hint" style="margin-bottom:12px;">Permanently deletes every customer profile and every booking (plus their photos/documents), so the next booking starts fresh at BK${String(new Date().getFullYear()).slice(-2)}-01. Vehicles, coupons, terms and payment settings are untouched. This cannot be undone.</p>
       <button class="btn-ghost" style="color:#F3A19C;border-color:#5A2A26;" onclick="factoryResetBookingsAndCustomers(this)">⚠️ Factory reset (bookings &amp; customers)</button>
@@ -7124,10 +7294,12 @@ function render(){
   // an admin tab re-rendering in the background) never gets bounced off it.
   const hashNow = location.hash.slice(1);
   if(hashNow.startsWith('status/')){
+    applyAnimGuard(); // these two routes return early, before the call further down -- without this here too, a background sync's silentRefreshFlag would have no effect on these pages, and they'd keep replaying their entrance animation on every sync
     renderBookingStatusPage(hashNow.slice('status/'.length));
     return;
   }
   if(hashNow.startsWith('book-vehicle/')){
+    applyAnimGuard();
     renderVehicleDetailPage(hashNow.slice('book-vehicle/'.length));
     return;
   }
@@ -7304,6 +7476,7 @@ function restartTour(){
   cleanupOldBookingDocuments(); // quietly clears out invoices/agreements older than 30 days, admin sessions only, at most once a day
   applySavedTheme();
   maybeStartHomeTour();
+  logVisitIfNeeded();
 })();
 </script>
 
