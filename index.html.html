@@ -517,6 +517,53 @@ if('serviceWorker' in navigator){
   .vcard:hover{border-color:var(--teal);box-shadow:0 10px 24px rgba(0,0,0,.4),0 0 22px rgba(57,212,90,.15);}
   .card:focus-within,.add-card:focus-within{border-color:var(--border-strong);}
   ::selection{background:rgba(255,122,26,.35);}
+
+  /* ---------- Oval / 3D button system ----------
+     Rounds every tappable button into a pill/oval shape and deepens the existing
+     skeuomorphic shadow (dark "rim" shadow + soft ambient shadow) with a thin glossy
+     highlight along the top edge, so buttons read as raised, pressable 3D objects
+     rather than flat rounded rectangles. Press/hover states already move the button
+     with translateY -- untouched here, just made deeper and glossier. */
+  .btn-primary,.btn-whatsapp,.btn-ghost,.vcard-select,.toggle-btn,.gmail-btn,
+  .doceditor-row button,.type-toggle,.type-toggle button,.tab-switch,.tab-switch button,
+  .doc-upload-btn{
+    border-radius:999px;
+  }
+  .btn-primary{
+    padding:15px 26px;
+    box-shadow:inset 0 1.5px 0 rgba(255,255,255,.4),inset 0 -10px 14px -8px rgba(0,0,0,.18),0 5px 0 var(--yellow-shadow),0 12px 22px rgba(0,0,0,.4),0 0 22px rgba(255,122,26,.28);
+  }
+  .btn-primary:hover{box-shadow:inset 0 1.5px 0 rgba(255,255,255,.45),inset 0 -10px 14px -8px rgba(0,0,0,.18),0 7px 0 var(--yellow-shadow),0 16px 26px rgba(0,0,0,.45),0 0 26px rgba(255,122,26,.4);}
+  .btn-primary:active{box-shadow:inset 0 1.5px 0 rgba(255,255,255,.3),inset 0 -6px 10px -6px rgba(0,0,0,.2),0 1px 0 var(--yellow-shadow),0 3px 9px rgba(0,0,0,.3);}
+  .btn-whatsapp{
+    padding:16px 26px;
+    box-shadow:inset 0 1.5px 0 rgba(255,255,255,.4),inset 0 -10px 14px -8px rgba(0,0,0,.18),0 5px 0 var(--whatsapp-shadow),0 12px 22px rgba(0,0,0,.4),0 0 20px rgba(37,211,102,.25);
+  }
+  .btn-whatsapp:hover{box-shadow:inset 0 1.5px 0 rgba(255,255,255,.45),inset 0 -10px 14px -8px rgba(0,0,0,.18),0 7px 0 var(--whatsapp-shadow),0 16px 26px rgba(0,0,0,.45),0 0 24px rgba(37,211,102,.35);}
+  .btn-whatsapp:active{box-shadow:inset 0 1.5px 0 rgba(255,255,255,.3),inset 0 -6px 10px -6px rgba(0,0,0,.2),0 1px 0 var(--whatsapp-shadow),0 3px 9px rgba(0,0,0,.3);}
+  .btn-ghost{
+    padding:10px 20px;
+    box-shadow:inset 0 1.5px 0 rgba(255,255,255,.12),0 4px 0 rgba(0,0,0,.4),0 8px 14px rgba(0,0,0,.28);
+  }
+  .btn-ghost:hover{box-shadow:inset 0 1.5px 0 rgba(255,255,255,.16),0 5px 0 rgba(0,0,0,.4),0 10px 18px rgba(0,0,0,.32);}
+  .btn-ghost:active{box-shadow:inset 0 1.5px 0 rgba(255,255,255,.08),0 1px 0 rgba(0,0,0,.4),0 2px 6px rgba(0,0,0,.22);}
+  .vcard-select{
+    padding:12px 18px;
+    box-shadow:inset 0 1.5px 0 rgba(255,255,255,.12),0 4px 0 rgba(0,0,0,.4),0 8px 14px rgba(0,0,0,.25);
+  }
+  .toggle-btn{
+    padding:10px 16px;
+    box-shadow:inset 0 1.5px 0 rgba(255,255,255,.1),0 4px 0 rgba(0,0,0,.4),0 7px 12px rgba(0,0,0,.22);
+  }
+  .type-toggle button.active,.tab-switch button.active{
+    box-shadow:inset 0 1.5px 0 rgba(255,255,255,.4),0 3px 0 var(--yellow-shadow),0 6px 12px rgba(0,0,0,.3),0 0 14px rgba(255,122,26,.3);
+  }
+  .icon-btn,.profile-actions .icon-btn{
+    box-shadow:inset 0 1.5px 0 rgba(255,255,255,.2),0 4px 0 rgba(0,0,0,.4),0 7px 10px rgba(0,0,0,.28);
+  }
+  .profile-actions .icon-btn.wa{box-shadow:inset 0 1.5px 0 rgba(255,255,255,.3),0 4px 0 var(--whatsapp-shadow),0 7px 10px rgba(0,0,0,.28);}
+  .km-chip{border-radius:16px;}
+  .status-pill,.badge{box-shadow:inset 0 1px 0 rgba(255,255,255,.15);}
 </style>
 </head>
 <body>
