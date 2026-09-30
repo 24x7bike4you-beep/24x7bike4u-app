@@ -911,8 +911,8 @@ let resetInProgress = false;
 async function syncFromSupabase(){
   if(resetInProgress) return;
   lastSyncAt = Date.now();
-  const [remoteVehicles, remoteCustomerRows, remoteCustomersLegacy, remoteBookings, remoteNotifications, remotePaymentSettings, remoteTerms] = await Promise.all([
-    sbGet('vehicles'), sbGetAllCustomerRows(), sbGet('customers'), sbGet('bookings'), sbGet('notifications'), sbGet('paymentSettings'), sbGet('terms')
+  const [remoteVehicles, remoteCustomerRows, remoteCustomersLegacy, remoteBookings, remoteNotifications, remotePaymentSettings, remoteTerms, remoteBusinessSettings] = await Promise.all([
+    sbGet('vehicles'), sbGetAllCustomerRows(), sbGet('customers'), sbGet('bookings'), sbGet('notifications'), sbGet('paymentSettings'), sbGet('terms'), sbGet('businessSettings')
   ]);
 
   // Vehicles are still one shared record (never migrated to individual rows like
@@ -991,6 +991,10 @@ async function syncFromSupabase(){
   // both called directly from the Payments/Terms admin screens).
   if(remotePaymentSettings && typeof remotePaymentSettings === 'object'){
     PAYMENT_SETTINGS = Object.assign({}, DEFAULT_PAYMENT_SETTINGS, remotePaymentSettings);
+  }
+
+  if(remoteBusinessSettings && typeof remoteBusinessSettings === 'object'){
+    BUSINESS_SETTINGS = Object.assign({}, DEFAULT_BUSINESS_SETTINGS, remoteBusinessSettings);
   }
 
   if(remoteTerms && typeof remoteTerms === 'object' && remoteTerms.text){
@@ -1427,6 +1431,31 @@ function savePaymentSettings(){
 }
 
 let PAYMENT_SETTINGS = loadPaymentSettings();
+
+/* ============ BUSINESS SETTINGS (shown on invoices: address, contact, bank details) ============ */
+const DEFAULT_BUSINESS_SETTINGS = {
+  name: '24x7 Bike4u - Bike Rentals',
+  addressLine1: '899 A-2, Ground floor, Scheme no 136, Vijay Nagar',
+  addressLine2: 'Indore, Madhya Pradesh, 452010',
+  phones: '8982008803, 8818899979',
+  email: '24x7bike4you@gmail.com',
+  website: 'www.24x7bike4u.co.in',
+  gstin: '',
+  bankName: 'HDFC Bank',
+  bankAccount: '50200080140211',
+  bankIfsc: 'HDFC0006335',
+  bankBranch: 'Scheme CXIV Indore'
+};
+
+function loadBusinessSettings(){
+  return Object.assign({}, DEFAULT_BUSINESS_SETTINGS);
+}
+
+function saveBusinessSettings(){
+  sbSet('businessSettings', BUSINESS_SETTINGS);
+}
+
+let BUSINESS_SETTINGS = loadBusinessSettings();
 
 /* ============ TERMS & CONDITIONS (synced via Supabase so admin edits appear on every device) ============ */
 const TERMS_STORAGE_KEY = 'bike4u_terms_v1';
@@ -1884,6 +1913,48 @@ function bookingDisplayNumber(id){
     .sort((a, b) => new Date(a.agreedAt || a.pickupDate || 0) - new Date(b.agreedAt || b.pickupDate || 0));
   const idx = sameYear.findIndex(b => b.id === id);
   return 'BK' + String(year).slice(-2) + '-' + String(idx + 1).padStart(2, '0');
+}
+
+// Same numbering scheme as bookingDisplayNumber (position among that year's bookings),
+// just under an "INV-" prefix for the invoice PDF -- so invoice numbers stay stable and
+// sequential without needing a separate counter stored anywhere.
+function invoiceDisplayNumber(id){
+  const bk = BOOKINGS.find(b => b.id === id);
+  if(!bk) return id;
+  const yearOf = b => new Date(b.agreedAt || b.pickupDate || 0).getFullYear();
+  const year = yearOf(bk);
+  const sameYear = BOOKINGS.filter(b => yearOf(b) === year)
+    .sort((a, b) => new Date(a.agreedAt || a.pickupDate || 0) - new Date(b.agreedAt || b.pickupDate || 0));
+  const idx = sameYear.findIndex(b => b.id === id);
+  return 'INV-' + String(year).slice(-2) + String(idx + 1).padStart(3, '0');
+}
+
+// Converts a whole-rupee amount into Indian-style words (lakh/crore grouping, not
+// thousand/million) for the "Total amount in words" line on the invoice PDF.
+function numberToWordsIndian(n){
+  n = Math.round(Math.abs(n || 0));
+  if(n === 0) return 'Zero Rupees Only';
+  const ones = ['','One','Two','Three','Four','Five','Six','Seven','Eight','Nine','Ten',
+    'Eleven','Twelve','Thirteen','Fourteen','Fifteen','Sixteen','Seventeen','Eighteen','Nineteen'];
+  const tens = ['','','Twenty','Thirty','Forty','Fifty','Sixty','Seventy','Eighty','Ninety'];
+  function twoDigits(num){
+    if(num < 20) return ones[num];
+    return tens[Math.floor(num/10)] + (num % 10 ? ' ' + ones[num % 10] : '');
+  }
+  function threeDigits(num){
+    if(num < 100) return twoDigits(num);
+    return ones[Math.floor(num/100)] + ' Hundred' + (num % 100 ? ' ' + twoDigits(num % 100) : '');
+  }
+  const crore = Math.floor(n / 10000000); n %= 10000000;
+  const lakh = Math.floor(n / 100000); n %= 100000;
+  const thousand = Math.floor(n / 1000); n %= 1000;
+  const hundred = n;
+  const parts = [];
+  if(crore) parts.push(threeDigits(crore) + ' Crore');
+  if(lakh) parts.push(threeDigits(lakh) + ' Lakh');
+  if(thousand) parts.push(threeDigits(thousand) + ' Thousand');
+  if(hundred) parts.push(threeDigits(hundred));
+  return parts.join(' ') + ' Rupees Only';
 }
 
 // PDF downloads depend on the externally-loaded jsPDF library, which can still be mid-flight
@@ -4049,6 +4120,7 @@ function renderAdmin(){
         </div>
         <div style="display:flex;gap:8px;">
           ${state.adminTab === 'vehicles' ? `<button class="btn-ghost" onclick="toggleAddForm()">${newVehicleDraft ? 'Cancel' : '+ Add vehicle'}</button>
+          <button class="btn-ghost" onclick="downloadServiceLogPDF()">⬇ Service log PDF</button>
           <button class="btn-ghost" onclick="offloadStoredVehiclePhotos(this)">🗜 Offload photos</button>
           <button class="btn-ghost" onclick="resetFleetToDefaults()">Reset to defaults</button>` : ''}
           ${state.adminTab === 'customers' ? `<button class="btn-ghost" onclick="toggleAddCustomerForm()">${newCustomerDraft ? 'Cancel' : '+ Add customer'}</button>` : ''}
@@ -5539,7 +5611,69 @@ function downloadIncomeReportPDF(){
 
 function renderPaymentsAdminHtml(){
   const p = PAYMENT_SETTINGS;
+  const b = BUSINESS_SETTINGS;
   return `
+    <div class="add-card">
+      <h3>Business &amp; invoice details</h3>
+      <p class="field-hint" style="margin-bottom:14px;">Printed at the top of every invoice PDF, along with your bank details for customers paying by transfer. Not shown to customers anywhere else.</p>
+      <div class="field">
+        <label>Business name</label>
+        <input type="text" id="biz-name-input" value="${b.name}" placeholder="e.g. 24x7 Bike4u - Bike Rentals">
+      </div>
+      <div class="field">
+        <label>Address line 1</label>
+        <input type="text" id="biz-addr1-input" value="${b.addressLine1}" placeholder="Shop no., street, area">
+      </div>
+      <div class="field">
+        <label>Address line 2 (city, state, pincode)</label>
+        <input type="text" id="biz-addr2-input" value="${b.addressLine2}" placeholder="City, State, Pincode">
+      </div>
+      <div class="field field-row">
+        <div>
+          <label>Phone number(s)</label>
+          <input type="text" id="biz-phones-input" value="${b.phones}" placeholder="e.g. 9998887770, 9998887771">
+        </div>
+        <div>
+          <label>Email</label>
+          <input type="text" id="biz-email-input" value="${b.email}" placeholder="you@example.com">
+        </div>
+      </div>
+      <div class="field field-row">
+        <div>
+          <label>Website (optional)</label>
+          <input type="text" id="biz-website-input" value="${b.website}" placeholder="www.yourbusiness.in">
+        </div>
+        <div>
+          <label>GSTIN (optional)</label>
+          <input type="text" id="biz-gstin-input" value="${b.gstin}" placeholder="Leave blank if not registered">
+        </div>
+      </div>
+      <h3 style="margin-top:18px;">Bank details (for invoice)</h3>
+      <div class="field field-row">
+        <div>
+          <label>Bank name</label>
+          <input type="text" id="biz-bankname-input" value="${b.bankName}" placeholder="e.g. HDFC Bank">
+        </div>
+        <div>
+          <label>Account number</label>
+          <input type="text" id="biz-bankacc-input" value="${b.bankAccount}" placeholder="Account number">
+        </div>
+      </div>
+      <div class="field field-row">
+        <div>
+          <label>IFSC code</label>
+          <input type="text" id="biz-ifsc-input" value="${b.bankIfsc}" placeholder="e.g. HDFC0006335">
+        </div>
+        <div>
+          <label>Branch</label>
+          <input type="text" id="biz-branch-input" value="${b.bankBranch}" placeholder="Branch name/area">
+        </div>
+      </div>
+      <div style="margin-top:10px;">
+        <button class="btn-primary" onclick="saveBusinessDetails()">Save business &amp; invoice details</button>
+      </div>
+    </div>
+
     <div class="add-card">
       <h3>Accepted payment methods</h3>
       <p class="field-hint" style="margin-bottom:14px;">These show up on the booking review page, the Payment page, and in booking agreements. All payment is still collected in person -- toggling these off just stops mentioning that method to customers.</p>
@@ -5569,6 +5703,23 @@ function renderPaymentsAdminHtml(){
       </div>
     </div>
   `;
+}
+
+function saveBusinessDetails(){
+  BUSINESS_SETTINGS.name = (document.getElementById('biz-name-input').value || '').trim() || DEFAULT_BUSINESS_SETTINGS.name;
+  BUSINESS_SETTINGS.addressLine1 = (document.getElementById('biz-addr1-input').value || '').trim();
+  BUSINESS_SETTINGS.addressLine2 = (document.getElementById('biz-addr2-input').value || '').trim();
+  BUSINESS_SETTINGS.phones = (document.getElementById('biz-phones-input').value || '').trim();
+  BUSINESS_SETTINGS.email = (document.getElementById('biz-email-input').value || '').trim();
+  BUSINESS_SETTINGS.website = (document.getElementById('biz-website-input').value || '').trim();
+  BUSINESS_SETTINGS.gstin = (document.getElementById('biz-gstin-input').value || '').trim();
+  BUSINESS_SETTINGS.bankName = (document.getElementById('biz-bankname-input').value || '').trim();
+  BUSINESS_SETTINGS.bankAccount = (document.getElementById('biz-bankacc-input').value || '').trim();
+  BUSINESS_SETTINGS.bankIfsc = (document.getElementById('biz-ifsc-input').value || '').trim();
+  BUSINESS_SETTINGS.bankBranch = (document.getElementById('biz-branch-input').value || '').trim();
+  saveBusinessSettings();
+  renderAdmin();
+  showAdminToast('Saved', 'Business & invoice details updated.');
 }
 
 function togglePaymentMethod(field, checked){
@@ -5960,15 +6111,25 @@ function invoiceLineItems(bk, extension){
   const items = [];
   const baseRent = bk.rentalTotal - (bk.pickupCharge||0) - (bk.dropCharge||0) - (bk.helmetCharge||0) + (bk.discountAmount||0) + (bk.couponDiscount||0)
     - (bk.extensions || []).reduce((s,e) => s + (e.charge||0), 0);
-  items.push(['Rent', bk.kmLabel, moneyPdf(baseRent)]);
-  if(bk.pickupCharge) items.push(['Pickup charge', '', moneyPdf(bk.pickupCharge)]);
-  if(bk.dropCharge) items.push(['Drop-off charge', '', moneyPdf(bk.dropCharge)]);
-  if(bk.helmetCharge) items.push(['Extra helmet', '', moneyPdf(bk.helmetCharge)]);
+
+  // The main rent line is only broken into a clean Rate x Qty (e.g. "500.00" x "3 Day",
+  // like a generic invoice) when the booking is a whole number of days AND the rent
+  // divides evenly across them -- otherwise the printed rate could multiply out to a
+  // different number than the actual amount, so it falls back to Qty 1 / Rate = Amount,
+  // which is always exactly correct however the package is priced (km-based, weekly, etc).
+  const dayMatch = /^(\d+)\s*Day/i.exec(bk.durationLabel || '');
+  const days = dayMatch ? parseInt(dayMatch[1], 10) : 0;
+  let rentQty = 1, rentRate = baseRent;
+  if(days > 0 && baseRent % days === 0){ rentQty = days; rentRate = baseRent / days; }
+  items.push({ label: bk.vehicleName || 'Rent', detail: bk.kmLabel, qty: rentQty, qtyLabel: rentQty > 1 ? `${rentQty} Day` : (days ? '1 Day' : '1'), rate: rentRate, amount: baseRent });
+  if(bk.pickupCharge) items.push({ label: 'Pickup charge', detail: '', qty: 1, qtyLabel: '1', rate: bk.pickupCharge, amount: bk.pickupCharge });
+  if(bk.dropCharge) items.push({ label: 'Drop-off charge', detail: '', qty: 1, qtyLabel: '1', rate: bk.dropCharge, amount: bk.dropCharge });
+  if(bk.helmetCharge) items.push({ label: 'Extra helmet', detail: '', qty: 1, qtyLabel: '1', rate: bk.helmetCharge, amount: bk.helmetCharge });
   (bk.extensions || []).forEach((e, i) => {
-    if(e.charge) items.push([`Extension ${i+1}`, `to ${fmtDate(e.toDate)}, ${fmtTime(e.toTime)}`, moneyPdf(e.charge)]);
+    if(e.charge) items.push({ label: `Extension ${i+1}`, detail: `to ${fmtDate(e.toDate)}, ${fmtTime(e.toTime)}`, qty: 1, qtyLabel: '1', rate: e.charge, amount: e.charge });
   });
-  if(bk.couponCode) items.push([`Coupon (${bk.couponCode})`, '', `-${moneyPdf(bk.couponDiscount)}`]);
-  if(bk.discountAmount) items.push(['Discount', bk.discountType === 'percent' ? `${bk.discountValue}%` : '', `-${moneyPdf(bk.discountAmount)}`]);
+  if(bk.couponCode) items.push({ label: `Coupon (${bk.couponCode})`, detail: '', qty: 1, qtyLabel: '1', rate: -bk.couponDiscount, amount: -bk.couponDiscount, negative: true });
+  if(bk.discountAmount) items.push({ label: 'Discount', detail: bk.discountType === 'percent' ? `${bk.discountValue}%` : '', qty: 1, qtyLabel: '1', rate: -bk.discountAmount, amount: -bk.discountAmount, negative: true });
   return items;
 }
 
@@ -5979,71 +6140,136 @@ function generateInvoicePDF(id, kind, extension){
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
   const pageW = doc.internal.pageSize.getWidth();
   const margin = 40;
-  let y = 50;
+  const rightEdge = pageW - margin;
+  let y = 52;
   const YELLOW = [255, 122, 26];
   const TEAL = [57, 212, 90];
   const DARK = [30, 34, 34];
+  const GRAY = [120, 120, 120];
+  const biz = BUSINESS_SETTINGS;
+  const invNo = kind === 'extension' ? `${invoiceDisplayNumber(bk.id)}-EXT` : invoiceDisplayNumber(bk.id);
 
-  try{ doc.addImage(LOGO_BASE64, 'PNG', margin, y - 26, 34, 34); }catch(e){}
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(18);
-  doc.setTextColor(...TEAL);
-  doc.text('24x7 Bike4u', margin + 42, y - 6);
-  doc.setFontSize(12);
-  doc.setTextColor(...DARK);
-  doc.text(kind === 'extension' ? 'Extension Invoice' : 'Booking Invoice', margin + 42, y + 12);
-  doc.setTextColor(0, 0, 0);
-  y += 34;
-
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(10);
-  doc.text(`Invoice for Booking ${bookingDisplayNumber(bk.id)}   ·   Issued ${fmtDate(todayStr())}`, margin, y);
-  y += 20;
-
-  doc.setDrawColor(...YELLOW);
-  doc.setLineWidth(2);
-  doc.line(margin, y, pageW - margin, y);
-  doc.setLineWidth(1);
+  // ---------- Header: INVOICE label, business details (left) + logo (right) ----------
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(...TEAL);
+  doc.text('I N V O I C E', margin, y);
+  try{ doc.addImage(LOGO_BASE64, 'PNG', rightEdge - 40, y - 26, 40, 40); }catch(e){}
   y += 22;
 
-  [['Customer', `${bk.customerName} (${bk.customerMobile})`],
-   ['Vehicle', `${bk.vehicleName} (${bk.vehicleColour}, ${bk.vehicleRc})`],
-   ['Pickup', `${fmtDate(bk.pickupDate)}, ${fmtTime(bk.pickupTime)}`],
-   ['Drop-off (current)', `${fmtDate(bk.dropDate)}, ${fmtTime(bk.dropTime)}`]].forEach(([label, value]) => {
-    doc.setFont('helvetica', 'bold'); doc.setTextColor(...TEAL); doc.text(label + ':', margin, y);
-    doc.setFont('helvetica', 'normal'); doc.setTextColor(...DARK); doc.text(String(value), margin + 130, y);
-    y += 16;
-  });
-  y += 10;
-
-  doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...TEAL);
-  doc.text('Item', margin, y); doc.text('Details', margin + 220, y); doc.text('Amount', pageW - margin - 70, y);
-  doc.setTextColor(0,0,0);
-  y += 6;
-  doc.setDrawColor(200); doc.line(margin, y, pageW - margin, y);
+  doc.setFontSize(16); doc.setTextColor(...DARK);
+  doc.text(biz.name || DEFAULT_BUSINESS_SETTINGS.name, margin, y);
   y += 16;
 
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(10.5);
-  invoiceLineItems(bk, extension).forEach(([label, detail, amt]) => {
-    doc.text(label, margin, y);
-    if(detail) doc.text(detail, margin + 220, y);
-    doc.text(String(amt), pageW - margin - 70, y);
-    y += 17;
-  });
-  doc.text('Deposit (refundable)', margin, y);
-  doc.text(moneyPdf(bk.deposit), pageW - margin - 70, y);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...GRAY);
+  [biz.addressLine1, biz.addressLine2].filter(Boolean).forEach(line => { doc.text(line, margin, y); y += 13; });
+  const contactBits = [];
+  if(biz.phones) contactBits.push(`Mobile: ${biz.phones}`);
+  if(biz.email) contactBits.push(`Email: ${biz.email}`);
+  if(contactBits.length){ doc.text(contactBits.join('    '), margin, y); y += 13; }
+  if(biz.website){ doc.text(`Website: ${biz.website}`, margin, y); y += 13; }
+  if(biz.gstin){ doc.text(`GSTIN: ${biz.gstin}`, margin, y); y += 13; }
   y += 10;
 
-  y += 10;
-  doc.setDrawColor(...YELLOW); doc.setLineWidth(2); doc.line(margin, y, pageW - margin, y); doc.setLineWidth(1);
-  y += 22;
-  doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(...TEAL);
-  doc.text('Total (rent + charges)', margin, y);
-  doc.text(moneyPdf(bk.rentalTotal), pageW - margin - 70, y);
+  doc.setDrawColor(...YELLOW); doc.setLineWidth(2); doc.line(margin, y, rightEdge, y); doc.setLineWidth(1);
+  y += 20;
+
+  // ---------- Invoice #, date, due date ----------
+  doc.setFontSize(10);
+  const colW = (rightEdge - margin) / 3;
+  [['Invoice #', invNo], ['Invoice Date', fmtDate(todayStr())], ['Due Date', fmtDate(todayStr())]].forEach(([label, value], i) => {
+    const x = margin + colW * i;
+    doc.setFont('helvetica', 'normal'); doc.setTextColor(...GRAY); doc.text(label + ':', x, y);
+    doc.setFont('helvetica', 'bold'); doc.setTextColor(...DARK); doc.text(String(value), x + doc.getTextWidth(label + ':  '), y);
+  });
+  y += 24;
+
+  // ---------- Customer + rental details ----------
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(10.5); doc.setTextColor(...GRAY);
+  doc.text('Customer Details:', margin, y);
+  doc.text('Rental Details:', margin + colW * 1.7, y);
+  y += 15;
+  const custLines = [bk.customerName, `Ph: ${bk.customerMobile}`];
+  if(bk.customerEmail) custLines.push(bk.customerEmail);
+  const rentalLines = [`${bk.vehicleName} (${bk.vehicleColour}, ${bk.vehicleRc})`,
+    `Pickup: ${fmtDate(bk.pickupDate)}, ${fmtTime(bk.pickupTime)}`,
+    `Drop-off: ${fmtDate(bk.dropDate)}, ${fmtTime(bk.dropTime)}`];
+  const startY = y;
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...DARK);
+  custLines.forEach((line, i) => doc.text(line, margin, startY + i * 14));
+  doc.setFontSize(9.5); doc.setTextColor(...GRAY);
+  rentalLines.forEach((line, i) => doc.text(line, margin + colW * 1.7, startY + i * 14));
+  y = startY + Math.max(custLines.length, rentalLines.length) * 14 + 12;
+
+  // ---------- Item table ----------
+  const cQty = rightEdge - 230, cRate = rightEdge - 165, cAmt = rightEdge - 70;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...TEAL);
+  doc.text('#', margin, y); doc.text('Item', margin + 20, y);
+  doc.text('Rate/Item', cRate, y, { align: 'right' }); doc.text('Qty', cQty, y, { align: 'right' }); doc.text('Amount', cAmt, y, { align: 'right' });
   doc.setTextColor(0,0,0);
-  y += 22;
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(120);
-  doc.text('Deposit is collected and refunded separately at drop-off. Payment: ' + bk.paymentMethod, margin, y);
+  y += 6;
+  doc.setDrawColor(200); doc.line(margin, y, rightEdge, y);
+  y += 15;
+
+  const items = invoiceLineItems(bk, extension);
+  let totalQty = 0;
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
+  items.forEach((it, i) => {
+    doc.setTextColor(...DARK);
+    doc.text(String(i+1), margin, y); doc.text(String(it.label), margin + 20, y);
+    doc.text((it.negative ? '-' : '') + moneyPdf(Math.abs(it.rate)), cRate, y, { align: 'right' });
+    doc.text(String(it.qtyLabel), cQty, y, { align: 'right' });
+    doc.text((it.negative ? '-' : '') + moneyPdf(Math.abs(it.amount)), cAmt, y, { align: 'right' });
+    y += 15;
+    if(it.detail){ doc.setFontSize(8.5); doc.setTextColor(...GRAY); doc.text(String(it.detail), margin + 20, y); y += 12; doc.setFontSize(10); }
+    totalQty += it.qty || 1;
+  });
+  doc.setTextColor(...DARK);
+  doc.text('Deposit (refundable, collected separately)', margin + 20, y);
+  doc.text(moneyPdf(bk.deposit), cAmt, y, { align: 'right' });
+  y += 6;
+
+  y += 8;
+  doc.setDrawColor(...YELLOW); doc.setLineWidth(2); doc.line(margin, y, rightEdge, y); doc.setLineWidth(1);
+  y += 20;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(12.5); doc.setTextColor(...TEAL);
+  doc.text('Total', margin, y);
+  doc.text(moneyPdf(bk.rentalTotal), cAmt, y, { align: 'right' });
+  y += 16;
+
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...GRAY);
+  doc.text(`Total Items / Qty : ${items.length} / ${totalQty}`, margin, y);
+  const wordsLines = doc.splitTextToSize(`Total amount in words: INR ${numberToWordsIndian(bk.rentalTotal)}`, rightEdge - margin - 160);
+  doc.text(wordsLines, rightEdge, y, { align: 'right' });
+  y += Math.max(12, wordsLines.length * 11) + 8;
+
+  doc.setDrawColor(200); doc.line(margin, y, rightEdge, y);
+  y += 18;
+  const amountDue = bk.paidOnline ? 0 : bk.rentalTotal;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...DARK);
+  doc.text('Amount Payable:', margin, y);
+  doc.text(amountDue === 0 ? 'Paid online' : moneyPdf(amountDue), cAmt, y, { align: 'right' });
+  y += 14;
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...GRAY);
+  doc.text('Payment method: ' + bk.paymentMethod, margin, y);
+  y += 30;
+
+  // ---------- Bank details (left) + signatory (right) ----------
+  const bankStartY = y;
+  if(biz.bankAccount || biz.bankName){
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10.5); doc.setTextColor(...DARK);
+    doc.text('Bank Details:', margin, y);
+    y += 15;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
+    [['Bank', biz.bankName], ['Account #', biz.bankAccount], ['IFSC Code', biz.bankIfsc], ['Branch', biz.bankBranch]]
+      .filter(([,v]) => v).forEach(([label, value]) => {
+        doc.setTextColor(...GRAY); doc.text(label + ':', margin, y);
+        doc.setTextColor(...DARK); doc.text(String(value), margin + 80, y);
+        y += 14;
+      });
+  }
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...GRAY);
+  doc.text(`For ${biz.name || DEFAULT_BUSINESS_SETTINGS.name}`, rightEdge, bankStartY, { align: 'right' });
+  doc.setDrawColor(180); doc.line(rightEdge - 130, bankStartY + 46, rightEdge, bankStartY + 46);
+  doc.text('Authorized Signatory', rightEdge, bankStartY + 58, { align: 'right' });
 
   return { doc, bk };
 }
@@ -6629,6 +6855,78 @@ function serviceDueBadgeHtml(v){
     🔧 <strong>Service due</strong>${kmOver != null ? ` — ${Math.round(kmOver)} km past its ${v.serviceIntervalKm || DEFAULT_SERVICE_INTERVAL_KM} km interval` : ' (based on time since last logged service)'}. Consider servicing before the next rental.
   </div>`;
 }
+// Downloads a one-page-per-fleet-size PDF listing every vehicle's service log --
+// last service date/odometer, current odometer, km run since, and whether it's overdue --
+// so it can be printed and kept at the counter or shared with a mechanic, without needing
+// to open the admin panel on a phone/laptop.
+function downloadServiceLogPDF(){
+  ensureJsPDFThen(function(){
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+    const margin = 40;
+    const rightEdge = pageW - margin;
+    let y = 50;
+    const YELLOW = [255, 122, 26], TEAL = [57, 212, 90], DARK = [30, 34, 34], GRAY = [120, 120, 120];
+
+    try{ doc.addImage(LOGO_BASE64, 'PNG', margin, y - 26, 34, 34); }catch(e){}
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(18); doc.setTextColor(...TEAL);
+    doc.text(BUSINESS_SETTINGS.name || DEFAULT_BUSINESS_SETTINGS.name, margin + 42, y - 6);
+    doc.setFontSize(12); doc.setTextColor(...DARK);
+    doc.text('Vehicle Service Log', margin + 42, y + 12);
+    y += 40;
+
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...DARK);
+    const dueCount = VEHICLES.filter(v => isServiceDue(v)).length;
+    doc.text(`Generated: ${fmtDate(todayStr())}    ${VEHICLES.length} vehicle${VEHICLES.length===1?'':'s'} total${dueCount ? `    ·    ${dueCount} overdue for service` : ''}`, margin, y);
+    y += 20;
+    doc.setDrawColor(...YELLOW); doc.setLineWidth(2); doc.line(margin, y, rightEdge, y); doc.setLineWidth(1);
+    y += 22;
+
+    const cols = [
+      { label: 'Vehicle', x: margin, align: 'left' },
+      { label: 'Last service', x: margin + 150, align: 'left' },
+      { label: 'Last odo', x: margin + 250, align: 'right' },
+      { label: 'Current odo', x: margin + 330, align: 'right' },
+      { label: 'Interval', x: margin + 415, align: 'right' },
+      { label: 'Status', x: rightEdge, align: 'right' }
+    ];
+    function drawHeader(){
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(...TEAL);
+      cols.forEach(c => doc.text(c.label, c.x, y, { align: c.align }));
+      doc.setTextColor(0,0,0);
+      y += 6;
+      doc.setDrawColor(200); doc.line(margin, y, rightEdge, y);
+      y += 15;
+    }
+    drawHeader();
+
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
+    VEHICLES.slice().sort((a,b) => (a.name||'').localeCompare(b.name||'')).forEach(v => {
+      if(y > pageH - 60){ doc.addPage(); y = 50; drawHeader(); }
+      const due = isServiceDue(v);
+      const interval = v.serviceIntervalKm || DEFAULT_SERVICE_INTERVAL_KM;
+      doc.setTextColor(...DARK);
+      doc.text(`${v.name}${v.hidden ? ' (hidden)' : ''}`, cols[0].x, y);
+      doc.text(v.lastServiceDate ? fmtDate(v.lastServiceDate) : 'Not logged', cols[1].x, y);
+      doc.text(v.lastServiceOdo != null ? `${v.lastServiceOdo} km` : '-', cols[2].x, y, { align: 'right' });
+      doc.text(v.currentOdo != null ? `${v.currentOdo} km` : '-', cols[3].x, y, { align: 'right' });
+      doc.text(`${interval} km`, cols[4].x, y, { align: 'right' });
+      doc.setFont('helvetica', 'bold'); doc.setTextColor(...(due ? [200, 60, 50] : TEAL));
+      doc.text(due ? 'Service due' : 'OK', cols[5].x, y, { align: 'right' });
+      doc.setFont('helvetica', 'normal');
+      y += 18;
+    });
+    if(VEHICLES.length === 0){
+      doc.setTextColor(...GRAY);
+      doc.text('No vehicles in the fleet yet.', margin, y);
+    }
+
+    doc.save(`Bike4u-Service-Log-${todayStr()}.pdf`);
+  });
+}
+
 function toggleHidden(id){
   const v = VEHICLES.find(x => x.id === id);
   v.hidden = !v.hidden;
