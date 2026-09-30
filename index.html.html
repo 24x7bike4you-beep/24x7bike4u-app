@@ -1444,7 +1444,9 @@ const DEFAULT_BUSINESS_SETTINGS = {
   bankName: 'HDFC Bank',
   bankAccount: '50200080140211',
   bankIfsc: 'HDFC0006335',
-  bankBranch: 'Scheme CXIV Indore'
+  bankBranch: 'Scheme CXIV Indore',
+  signatureBase64: '',
+  signatureAspect: 3
 };
 
 function loadBusinessSettings(){
@@ -1913,20 +1915,6 @@ function bookingDisplayNumber(id){
     .sort((a, b) => new Date(a.agreedAt || a.pickupDate || 0) - new Date(b.agreedAt || b.pickupDate || 0));
   const idx = sameYear.findIndex(b => b.id === id);
   return 'BK' + String(year).slice(-2) + '-' + String(idx + 1).padStart(2, '0');
-}
-
-// Same numbering scheme as bookingDisplayNumber (position among that year's bookings),
-// just under an "INV-" prefix for the invoice PDF -- so invoice numbers stay stable and
-// sequential without needing a separate counter stored anywhere.
-function invoiceDisplayNumber(id){
-  const bk = BOOKINGS.find(b => b.id === id);
-  if(!bk) return id;
-  const yearOf = b => new Date(b.agreedAt || b.pickupDate || 0).getFullYear();
-  const year = yearOf(bk);
-  const sameYear = BOOKINGS.filter(b => yearOf(b) === year)
-    .sort((a, b) => new Date(a.agreedAt || a.pickupDate || 0) - new Date(b.agreedAt || b.pickupDate || 0));
-  const idx = sameYear.findIndex(b => b.id === id);
-  return 'INV-' + String(year).slice(-2) + String(idx + 1).padStart(3, '0');
 }
 
 // Converts a whole-rupee amount into Indian-style words (lakh/crore grouping, not
@@ -5669,7 +5657,20 @@ function renderPaymentsAdminHtml(){
           <input type="text" id="biz-branch-input" value="${b.bankBranch}" placeholder="Branch name/area">
         </div>
       </div>
-      <div style="margin-top:10px;">
+      <h3 style="margin-top:18px;">Signature (for invoice)</h3>
+      <p class="field-hint" style="margin-bottom:10px;">A photo or scan of your signature, printed above "Authorized Signatory" on every invoice. Saves and applies immediately -- no need to press Save below.</p>
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+        ${b.signatureBase64 ? `
+          <img src="${b.signatureBase64}" alt="Signature" style="height:52px;background:#fff;border-radius:6px;padding:4px 8px;border:1px solid var(--border-strong);">
+          <button class="btn-ghost" onclick="removeBusinessSignature()">Remove signature</button>
+        ` : `<span class="field-hint">No signature uploaded yet.</span>`}
+        <label class="doc-upload-btn" style="cursor:pointer;">
+          ${b.signatureBase64 ? 'Replace signature' : '+ Upload signature'}
+          <input type="file" accept="image/*" style="display:none;" onchange="uploadBusinessSignature(this)">
+        </label>
+      </div>
+
+      <div style="margin-top:18px;">
         <button class="btn-primary" onclick="saveBusinessDetails()">Save business &amp; invoice details</button>
       </div>
     </div>
@@ -5720,6 +5721,46 @@ function saveBusinessDetails(){
   saveBusinessSettings();
   renderAdmin();
   showAdminToast('Saved', 'Business & invoice details updated.');
+}
+
+// Photo of a signature, signed on paper -- flattened onto a white background (rather than
+// kept transparent) since that's exactly how it will sit on the white invoice page, then
+// stored as a small JPEG. A signature scan is naturally tiny once resized, so this doesn't
+// need the fuller HEIC/retry handling compressImageFile has for camera photos.
+function uploadBusinessSignature(input){
+  const file = input.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      const maxW = 320;
+      let w = img.width, h = img.height;
+      if(w > maxW){ h = Math.round(h * maxW / w); w = maxW; }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      BUSINESS_SETTINGS.signatureBase64 = canvas.toDataURL('image/jpeg', 0.9);
+      BUSINESS_SETTINGS.signatureAspect = w / h;
+      saveBusinessSettings();
+      renderAdmin();
+    };
+    img.onerror = () => alert('Could not read that image. Please try a JPEG or PNG file.');
+    img.src = e.target.result;
+  };
+  reader.onerror = () => alert('Could not read that file.');
+  reader.readAsDataURL(file);
+  input.value = '';
+}
+
+function removeBusinessSignature(){
+  if(!confirm('Remove the saved signature? Invoices will show a blank signature line until you upload a new one.')) return;
+  BUSINESS_SETTINGS.signatureBase64 = '';
+  saveBusinessSettings();
+  renderAdmin();
 }
 
 function togglePaymentMethod(field, checked){
@@ -6147,7 +6188,10 @@ function generateInvoicePDF(id, kind, extension){
   const DARK = [30, 34, 34];
   const GRAY = [120, 120, 120];
   const biz = BUSINESS_SETTINGS;
-  const invNo = kind === 'extension' ? `${invoiceDisplayNumber(bk.id)}-EXT` : invoiceDisplayNumber(bk.id);
+  // Same booking ID shown everywhere else in the app (booking cards, the agreement PDF,
+  // the customer's status link) -- kept identical here rather than inventing a separate
+  // invoice-numbering scheme, so admin and customer are always looking at the same number.
+  const invNo = bookingDisplayNumber(bk.id) + (kind === 'extension' ? '-EXT' : '');
 
   // ---------- Header: INVOICE label, business details (left) + logo (right) ----------
   doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(...TEAL);
@@ -6172,11 +6216,11 @@ function generateInvoicePDF(id, kind, extension){
   doc.setDrawColor(...YELLOW); doc.setLineWidth(2); doc.line(margin, y, rightEdge, y); doc.setLineWidth(1);
   y += 20;
 
-  // ---------- Invoice #, date, due date ----------
+  // ---------- Invoice #, date ----------
   doc.setFontSize(10);
-  const colW = (rightEdge - margin) / 3;
-  [['Invoice #', invNo], ['Invoice Date', fmtDate(todayStr())], ['Due Date', fmtDate(todayStr())]].forEach(([label, value], i) => {
-    const x = margin + colW * i;
+  const splitX = margin + (rightEdge - margin) * 0.57;
+  [['Invoice #', invNo], ['Invoice Date', fmtDate(todayStr())]].forEach(([label, value], i) => {
+    const x = margin + (i === 0 ? 0 : (splitX - margin));
     doc.setFont('helvetica', 'normal'); doc.setTextColor(...GRAY); doc.text(label + ':', x, y);
     doc.setFont('helvetica', 'bold'); doc.setTextColor(...DARK); doc.text(String(value), x + doc.getTextWidth(label + ':  '), y);
   });
@@ -6185,7 +6229,7 @@ function generateInvoicePDF(id, kind, extension){
   // ---------- Customer + rental details ----------
   doc.setFont('helvetica', 'bold'); doc.setFontSize(10.5); doc.setTextColor(...GRAY);
   doc.text('Customer Details:', margin, y);
-  doc.text('Rental Details:', margin + colW * 1.7, y);
+  doc.text('Rental Details:', splitX, y);
   y += 15;
   const custLines = [bk.customerName, `Ph: ${bk.customerMobile}`];
   if(bk.customerEmail) custLines.push(bk.customerEmail);
@@ -6196,7 +6240,7 @@ function generateInvoicePDF(id, kind, extension){
   doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...DARK);
   custLines.forEach((line, i) => doc.text(line, margin, startY + i * 14));
   doc.setFontSize(9.5); doc.setTextColor(...GRAY);
-  rentalLines.forEach((line, i) => doc.text(line, margin + colW * 1.7, startY + i * 14));
+  rentalLines.forEach((line, i) => doc.text(line, splitX, startY + i * 14));
   y = startY + Math.max(custLines.length, rentalLines.length) * 14 + 12;
 
   // ---------- Item table ----------
@@ -6268,6 +6312,15 @@ function generateInvoicePDF(id, kind, extension){
   }
   doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...GRAY);
   doc.text(`For ${biz.name || DEFAULT_BUSINESS_SETTINGS.name}`, rightEdge, bankStartY, { align: 'right' });
+  if(biz.signatureBase64){
+    // Drawn to fit a fixed box (not stretched) using the aspect ratio saved at upload time,
+    // bottom-aligned so it sits right above the signature line like a real signed invoice.
+    const boxW = 110, boxH = 34;
+    const aspect = biz.signatureAspect || 3;
+    let sw = boxW, sh = sw / aspect;
+    if(sh > boxH){ sh = boxH; sw = sh * aspect; }
+    try{ doc.addImage(biz.signatureBase64, 'JPEG', rightEdge - sw, bankStartY + 44 - sh, sw, sh); }catch(e){}
+  }
   doc.setDrawColor(180); doc.line(rightEdge - 130, bankStartY + 46, rightEdge, bankStartY + 46);
   doc.text('Authorized Signatory', rightEdge, bankStartY + 58, { align: 'right' });
 
