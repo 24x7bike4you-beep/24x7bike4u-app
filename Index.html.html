@@ -101,44 +101,6 @@
 })();
 </script>
 <script>
-// Load the Firebase client libraries (compat build -- plain <script> globals, no bundler
-// needed, same style this file already uses for jsPDF/Supabase) from the first CDN that
-// responds, so a blocked/slow CDN doesn't silently break cross-device sync.
-(function loadFirebaseJs(){
-  var FB_VER = '10.13.2';
-  var cdns = [
-    'https://www.gstatic.com/firebasejs/' + FB_VER + '/',
-    'https://cdn.jsdelivr.net/npm/firebase@' + FB_VER + '/compat/'
-  ];
-  // Only the Firestore (database) piece of Firebase is used -- file storage (photos, KYC
-  // docs, invoices) is handled by a separate, self-hosted PHP API instead (see
-  // STORAGE_API_BASE below), so the Storage SDK doesn't need to be loaded at all.
-  var libs = ['firebase-app-compat.js', 'firebase-firestore-compat.js'];
-  function loadFrom(cdnIndex){
-    if(cdnIndex >= cdns.length){
-      console.warn('Bike4u: could not load the Firebase library from any CDN -- check your internet connection.');
-      return;
-    }
-    var base = cdns[cdnIndex];
-    var remaining = libs.length;
-    var failed = false;
-    libs.forEach(function(lib){
-      var s = document.createElement('script');
-      s.src = base + lib;
-      s.onload = function(){ remaining--; if(remaining === 0 && !failed) console.log('Bike4u: Firebase library loaded from', base); };
-      s.onerror = function(){
-        if(failed) return;
-        failed = true;
-        // One of this CDN's three files failed -- fall back to the next CDN for all three,
-        // rather than ending up with an inconsistent half-loaded set of globals.
-        loadFrom(cdnIndex + 1);
-      };
-      document.head.appendChild(s);
-    });
-  }
-  loadFrom(0);
-})();
-
 // Caches the page shell so a repeat visit on a slow/flaky connection (or fully offline)
 // opens instantly instead of waiting on the network -- see sw.js for the caching strategy.
 // Registered after 'load' so it never competes with the initial page render for bandwidth.
@@ -671,69 +633,28 @@ const DEFAULT_VEHICLES = [
    Data is cached in this browser's localStorage for instant load, and
    kept in sync with a Supabase table so every device/browser sees the
    same vehicles, photos, customer profiles, KYC documents and bookings. */
-// Fill these in with your own Firebase project's values (Firebase console -> Project
-// settings -> General -> "Your apps" -> SDK setup and configuration -> Config). Every
-// field here is a public identifier, not a secret -- same as the old Supabase anon key,
-// it's safe to ship inside the page; what actually protects your data is the Firestore/
-// Storage security rules you set in the Firebase console, not keeping this object hidden.
-const FIREBASE_CONFIG = {
-  apiKey: "REPLACE_WITH_YOUR_FIREBASE_API_KEY",
-  authDomain: "REPLACE_WITH_YOUR_PROJECT.firebaseapp.com",
-  projectId: "REPLACE_WITH_YOUR_PROJECT_ID",
-  storageBucket: "REPLACE_WITH_YOUR_PROJECT.appspot.com",
-  messagingSenderId: "REPLACE_WITH_YOUR_SENDER_ID",
-  appId: "REPLACE_WITH_YOUR_APP_ID"
-};
-let fbApp = null;
-let fbDb = null;
-let fbClientPromise = null;
-function waitForFirebaseLib(timeoutMs){
-  return new Promise((resolve) => {
-    const ready = () => window.firebase && window.firebase.initializeApp && window.firebase.firestore;
-    if(ready()){ resolve(true); return; }
-    const start = Date.now();
-    const iv = setInterval(() => {
-      if(ready()){
-        clearInterval(iv);
-        resolve(true);
-      } else if(Date.now() - start > (timeoutMs || 6000)){
-        clearInterval(iv);
-        resolve(false);
-      }
-    }, 100);
-  });
-}
-// Returns { db } once Firebase (Firestore -- the database half only; file storage is a
-// separate self-hosted API, see uploadToStorage/etc. below) is ready, or null if it
-// couldn't connect. Kept under its old name (getSupabase) so none of the dozens of call
-// sites elsewhere in this file that already call it needed to change.
+// Data (vehicles, bookings, customers, notifications, settings -- everything except the
+// actual photo/document files, which go through STORAGE_API_BASE below) is kept in sync via
+// a small self-hosted PHP + JSON API on the same Hostinger hosting as the storage API,
+// rather than any third-party database service. 'data-api' is a sibling folder next to
+// 'storage-api' on that same site -- see data-api/*.php. DATA_API_SECRET must exactly match
+// DATA_SECRET in data-api/config.php (it already does, out of the box). Like every other
+// key in this file, it's visible to anyone who views the page's source -- it isn't meant to
+// withstand a determined attacker, just to keep the endpoint from being stumbled into by
+// accident, the same tradeoff already made for the storage API.
+const DATA_API_BASE = 'https://aliceblue-curlew-157173.hostingersite.com/data-api'; // change this if you host the PHP files at a different URL
+const DATA_API_SECRET = 'mbgiGsqKEAS4DL8gGuxthpcw0DTQDD1D'; // must exactly match DATA_SECRET in data-api/config.php
+
+// Returns a truthy client marker once the data API is configured, or null if it isn't.
+// Kept under its old name (getSupabase) so none of the dozens of call sites elsewhere in
+// this file that already call it needed to change, even though this now talks to the
+// Hostinger data API above instead of Firebase/Supabase.
 async function getSupabase(){
-  if(fbDb) return { db: fbDb };
-  if(fbClientPromise) return fbClientPromise;
-  fbClientPromise = (async () => {
-    if(FIREBASE_CONFIG.apiKey.indexOf('REPLACE_WITH') === 0){
-      console.warn('Bike4u: Firebase is not configured yet -- fill in FIREBASE_CONFIG with your project\'s values.');
-      fbClientPromise = null;
-      return null;
-    }
-    const ready = await waitForFirebaseLib(10000);
-    if(!ready){
-      console.warn('Bike4u: Firebase library not available within 10s -- will retry on the next call rather than staying failed for the rest of this session.');
-      fbClientPromise = null; // don't cache a failure -- the library may simply still be loading (a slow CDN, a slow connection), and the next call should get a fresh chance rather than being stuck permanently failed until a full page reload
-      return null;
-    }
-    try{
-      fbApp = window.firebase.apps && window.firebase.apps.length ? window.firebase.app() : window.firebase.initializeApp(FIREBASE_CONFIG);
-      fbDb = window.firebase.firestore();
-      // Matches the old Supabase path's behavior: a save there went over the wire as JSON,
-      // which silently drops any key whose value is `undefined` -- Firestore's SDK throws
-      // on that by default, so this keeps every existing save call working unchanged.
-      try{ fbDb.settings({ ignoreUndefinedProperties: true }); }catch(e){}
-      console.log('Bike4u: Firebase client ready.');
-      return { db: fbDb };
-    }catch(e){ console.warn('Bike4u: Firebase client init failed:', e); fbClientPromise = null; return null; }
-  })();
-  return fbClientPromise;
+  if(!DATA_API_BASE || DATA_API_BASE.indexOf('REPLACE_WITH') === 0){
+    console.warn('Bike4u: data API is not configured yet -- fill in DATA_API_BASE with your Hostinger data-api URL.');
+    return null;
+  }
+  return { base: DATA_API_BASE };
 }
 
 // Races any promise against a timeout so a request on a very poor/flaky connection fails
@@ -910,18 +831,16 @@ async function sbGet(key){
   const client = await getSupabase();
   if(!client) return null;
   try{
+    const url = client.base + '/get.php?secret=' + encodeURIComponent(DATA_API_SECRET) + '&key=' + encodeURIComponent(key);
     const result = await withTimeout(
-      client.db.collection('app_data').doc(key).get().then(snap => ({ snap })).catch(err => ({ error: err })),
+      fetch(url).then(r => r.json()).catch(err => ({ error: err })),
       10000,
       { error: 'timeout' }
     );
-    if(result.error){ console.warn('Bike4u: Firebase load error for', key, '--', (result.error && result.error.message) || result.error); return null; }
-    const exists = result.snap && result.snap.exists;
-    console.log('Bike4u: loaded', key, 'from Firebase:', exists ? 'found' : 'not found yet');
-    if(!exists) return null;
-    const data = result.snap.data();
-    return data ? data.value : null;
-  }catch(e){ console.warn('Bike4u: Firebase load failed for', key, e); return null; }
+    if(result.error){ console.warn('Bike4u: data API load error for', key, '--', (result.error && result.error.message) || result.error); return null; }
+    console.log('Bike4u: loaded', key, 'from data API:', (result.value !== null && result.value !== undefined) ? 'found' : 'not found yet');
+    return result.value !== undefined ? result.value : null;
+  }catch(e){ console.warn('Bike4u: data API load failed for', key, e); return null; }
 }
 
 async function sbSet(key, value){
@@ -929,14 +848,58 @@ async function sbSet(key, value){
   if(!client) return false;
   try{
     const result = await withTimeout(
-      client.db.collection('app_data').doc(key).set({ value, updated_at: new Date().toISOString() }).then(() => ({ ok: true })).catch(err => ({ error: err })),
+      fetch(client.base + '/set.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secret: DATA_API_SECRET, key, value })
+      }).then(r => r.json()).catch(err => ({ error: err })),
       10000,
       { error: 'timeout' }
     );
-    if(result.error){ console.warn('Bike4u: Firebase save error for', key, '--', (result.error && result.error.message) || result.error); return false; }
-    console.log('Bike4u: saved', key, 'to Firebase.');
+    if(result.error){ console.warn('Bike4u: data API save error for', key, '--', (result.error && result.error.message) || result.error); return false; }
+    console.log('Bike4u: saved', key, 'to data API.');
     return true;
-  }catch(e){ console.warn('Bike4u: Firebase save failed for', key, e); return false; }
+  }catch(e){ console.warn('Bike4u: data API save failed for', key, e); return false; }
+}
+
+// Lists every stored key (optionally only those starting with `prefix`), each with its
+// current value and updated_at timestamp -- the data-API equivalent of a Firestore prefix
+// query, and also what the polling-based "live sync" below uses to see what's changed.
+async function sbListPrefix(prefix, timeoutMs){
+  const client = await getSupabase();
+  if(!client) return null;
+  try{
+    const url = client.base + '/list.php?secret=' + encodeURIComponent(DATA_API_SECRET) + '&prefix=' + encodeURIComponent(prefix || '');
+    const result = await withTimeout(
+      fetch(url).then(r => r.json()).catch(err => ({ error: err })),
+      timeoutMs || 10000,
+      { error: 'timeout' }
+    );
+    if(result.error){ console.warn('Bike4u: data API list error for prefix', prefix, '--', (result.error && result.error.message) || result.error); return null; }
+    return result.items || [];
+  }catch(e){ console.warn('Bike4u: data API list failed for prefix', prefix, e); return null; }
+}
+
+// Deletes one or more keys outright (no prefix matching here -- callers that need to delete
+// by prefix/range use sbListPrefix first to find the matching keys, same as the old
+// Firestore prefix-query-then-delete pattern).
+async function sbDeleteKeys(keys, timeoutMs){
+  const client = await getSupabase();
+  if(!client) return false;
+  if(!keys || !keys.length) return true;
+  try{
+    const result = await withTimeout(
+      fetch(client.base + '/delete.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secret: DATA_API_SECRET, keys })
+      }).then(r => r.json()).catch(err => ({ error: err })),
+      timeoutMs || 10000,
+      { error: 'timeout' }
+    );
+    if(result.error){ console.warn('Bike4u: data API delete error for', keys, '--', (result.error && result.error.message) || result.error); return false; }
+    return true;
+  }catch(e){ console.warn('Bike4u: data API delete failed for', keys, e); return false; }
 }
 
 // Pulls the latest vehicles/customers/bookings from Supabase (if reachable),
@@ -1196,63 +1159,19 @@ function resumePendingSyncs(){
    elsewhere, so it needs no extra setup on the Supabase side at all. */
 const CUSTOMER_ROW_PREFIX = 'customer_';
 
-// Shared helper: finds every app_data doc whose id starts with `prefix`. Firestore has no
-// "LIKE" operator, but a plain range query on the document id (>= prefix, < prefix + the
-// highest possible unicode character) gives the same "starts with" result, since Firestore
-// orders query results byte-for-byte by the field being compared -- this is the standard
-// prefix-query trick for Firestore. Returns the raw matching docs (not just their 'value'
-// field) so callers that need the doc ref itself (for deleting) can still get it.
-async function sbQueryPrefix(prefix, timeoutMs){
-  const client = await getSupabase();
-  if(!client) return null;
-  try{
-    const fp = window.firebase.firestore.FieldPath.documentId();
-    const result = await withTimeout(
-      client.db.collection('app_data')
-        .where(fp, '>=', prefix)
-        .where(fp, '<', prefix + '')
-        .get().then(snap => ({ snap })).catch(err => ({ error: err })),
-      timeoutMs || 10000,
-      { error: 'timeout' }
-    );
-    if(result.error) return { error: result.error };
-    return { docs: result.snap.docs };
-  }catch(e){ return { error: e }; }
-}
-
 async function sbGetAllCustomerRows(){
-  const result = await sbQueryPrefix(CUSTOMER_ROW_PREFIX);
-  if(!result || result.error){ if(result) console.warn('Bike4u: could not load customer rows --', (result.error && result.error.message) || result.error); return null; }
-  return result.docs.map(d => d.data().value).filter(Boolean);
+  const items = await sbListPrefix(CUSTOMER_ROW_PREFIX);
+  if(!items) return null;
+  return items.map(e => e.value).filter(Boolean);
 }
 async function sbSetOneCustomer(customer){
-  const client = await getSupabase();
-  if(!client) return false;
-  try{
-    const result = await withTimeout(
-      client.db.collection('app_data').doc(CUSTOMER_ROW_PREFIX + customer.id).set({ value: customer, updated_at: new Date().toISOString() }).then(() => ({ ok: true })).catch(err => ({ error: err })),
-      10000,
-      { error: 'timeout' }
-    );
-    if(result.error){ console.warn('Bike4u: customer row save failed for', customer.id, '--', (result.error && result.error.message) || result.error); return false; }
-    return true;
-  }catch(e){ console.warn('Bike4u: sbSetOneCustomer failed for', customer.id, e); return false; }
+  return sbSet(CUSTOMER_ROW_PREFIX + customer.id, customer);
 }
 function pushAllCustomerRows(){
   return Promise.all(CUSTOMERS.map(c => sbSetOneCustomer(c))).then(results => results.every(Boolean));
 }
 async function sbDeleteCustomerRow(id){
-  const client = await getSupabase();
-  if(!client) return false;
-  try{
-    const result = await withTimeout(
-      client.db.collection('app_data').doc(CUSTOMER_ROW_PREFIX + id).delete().then(() => ({ ok: true })).catch(err => ({ error: err })),
-      10000,
-      { error: 'timeout' }
-    );
-    if(result.error){ console.warn('Bike4u: customer row delete failed for', id, '--', (result.error && result.error.message) || result.error); return false; }
-    return true;
-  }catch(e){ console.warn('Bike4u: sbDeleteCustomerRow failed for', id, e); return false; }
+  return sbDeleteKeys([CUSTOMER_ROW_PREFIX + id]);
 }
 
 /* ============ VISITOR ANALYTICS (how many people opened the site each day) ============
@@ -1297,34 +1216,21 @@ function logVisitIfNeeded(){
 }
 
 async function sbGetAllVisitRows(){
-  const result = await sbQueryPrefix(VISIT_ROW_PREFIX);
-  if(!result || result.error){ if(result) console.warn('Bike4u: could not load visit rows --', (result.error && result.error.message) || result.error); return null; }
-  return result.docs.map(d => d.data().value).filter(Boolean);
+  const items = await sbListPrefix(VISIT_ROW_PREFIX);
+  if(!items) return null;
+  return items.map(e => e.value).filter(Boolean);
 }
 async function sbDeleteVisitRowsBefore(cutoffDateStr){
-  const client = await getSupabase();
-  if(!client) return false;
   try{
     // Old rows are named 'visit_<date>_<id>', and dates sort lexically the same as
-    // chronologically (YYYY-MM-DD), so a plain id range query finds exactly the rows to
-    // delete without needing to fetch every row first to check its date. Firestore has no
-    // delete-by-query, so this fetches the matching doc refs and deletes them in batches
-    // (capped at 500 writes per batch).
-    const fp = window.firebase.firestore.FieldPath.documentId();
-    const result = await withTimeout(
-      client.db.collection('app_data')
-        .where(fp, '>=', VISIT_ROW_PREFIX)
-        .where(fp, '<', VISIT_ROW_PREFIX + cutoffDateStr)
-        .get().then(snap => ({ snap })).catch(err => ({ error: err })),
-      15000,
-      { error: 'timeout' }
-    );
-    if(result.error){ console.warn('Bike4u: visit row cleanup failed --', (result.error && result.error.message) || result.error); return false; }
-    const docs = result.snap.docs;
-    for(let i = 0; i < docs.length; i += 400){
-      const batch = client.db.batch();
-      docs.slice(i, i + 400).forEach(d => batch.delete(d.ref));
-      await batch.commit();
+    // chronologically (YYYY-MM-DD), so a plain key comparison finds exactly the rows to
+    // delete without needing to inspect each one individually.
+    const items = await sbListPrefix(VISIT_ROW_PREFIX, 15000);
+    if(!items){ console.warn('Bike4u: visit row cleanup failed -- could not list visit rows'); return false; }
+    const staleKeys = items.filter(e => e.key < VISIT_ROW_PREFIX + cutoffDateStr).map(e => e.key);
+    for(let i = 0; i < staleKeys.length; i += 400){
+      const ok = await sbDeleteKeys(staleKeys.slice(i, i + 400), 15000);
+      if(!ok){ console.warn('Bike4u: visit row cleanup failed deleting a batch'); return false; }
     }
     return true;
   }catch(e){ console.warn('Bike4u: sbDeleteVisitRowsBefore failed', e); return false; }
@@ -4035,29 +3941,27 @@ function checkOverdueBookings(){
   });
 }
 
-// Cross-device alerts: as long as the admin has this app open (any tab, any device --
-// phone or computer), Firestore's realtime listener pushes every bookings/customers change
-// straight to this tab, so a booking or signup made on a *different* device still triggers
-// a notification here. Needs nothing special enabled on the Firebase side -- every
-// Firestore document is live-listenable by default, unlike Supabase's Realtime which had
-// to be turned on per table.
+// Cross-device alerts: shared PHP hosting has no way to push changes to open tabs the way
+// Firestore's onSnapshot used to, so instead this polls the data API every few seconds and
+// diffs each key's updated_at against what this tab last saw -- a booking or signup made on
+// a *different* device still shows up here within a few seconds, just pulled instead of
+// pushed. 'Live sync' below means "polling is working", not a literal push connection.
 let adminRealtimeChannel = null;
-// Tracks whether this device's live connection is actually up -- 'connecting' until the
-// first status callback, then 'live' or 'down'. This exists because a broken/never-
-// established connection fails *silently* by design (no error, it just never receives
-// anything), which is exactly what made "some devices see updates, others don't" so hard
-// to diagnose -- there was no way to tell the two situations apart before now. A
-// background/inactive browser tab is the most common reason a laptop's connection quietly
-// drops while a phone (usually the foreground, actively-used tab) stays connected.
+let adminDataVersions = new Map(); // key -> updated_at last seen by this tab
+let adminRealtimePolledOnce = false;
+// Tracks whether this device's polling is actually succeeding -- 'connecting' until the
+// first poll resolves, then 'live' or 'down'. A background/inactive browser tab throttling
+// its own timers is the most common reason a laptop's polling quietly slows down while a
+// phone (usually the foreground, actively-used tab) stays prompt.
 let realtimeStatus = 'connecting';
 function realtimeStatusLabel(){
   return realtimeStatus === 'live' ? '🟢 Live sync' : realtimeStatus === 'down' ? '🔴 Not connected — tap Refresh, or reload this tab' : '🟡 Connecting…';
 }
 
-// A concrete, one-tap answer to "is Firebase actually working" instead of having to
+// A concrete, one-tap answer to "is the data API actually working" instead of having to
 // infer it from whether data looks right -- writes a small throwaway test record, reads
-// it back, deletes it again, and reports each step plus whether the live connection is up,
-// rather than just trusting the app's normal behavior at face value.
+// it back, deletes it again, and reports each step plus whether polling is up, rather than
+// just trusting the app's normal behavior at face value.
 async function testSupabaseConnection(btn){
   if(btn){ btn.disabled = true; btn.textContent = 'Testing…'; }
   const results = [];
@@ -4065,7 +3969,7 @@ async function testSupabaseConnection(btn){
   const testValue = { testedAt: new Date().toISOString(), device: (navigator.userAgent || '').slice(0, 70) };
 
   const client = await getSupabase();
-  results.push({ step: 'Firebase library loaded & connected', ok: !!client });
+  results.push({ step: 'Data API configured', ok: !!client });
 
   if(client){
     const writeOk = await sbSet(testKey, testValue);
@@ -4075,131 +3979,129 @@ async function testSupabaseConnection(btn){
     const readOk = !!(readBack && readBack.testedAt === testValue.testedAt);
     results.push({ step: 'Read it back correctly', ok: readOk });
 
-    let deleteOk = false;
-    try{
-      await client.db.collection('app_data').doc(testKey).delete();
-      deleteOk = true;
-    }catch(e){}
+    const deleteOk = await sbDeleteKeys([testKey]);
     results.push({ step: 'Delete the test record (cleanup)', ok: deleteOk });
   }
 
   results.push({
-    step: 'Live real-time connection',
+    step: 'Live sync (polling)',
     ok: realtimeStatus === 'live',
-    note: realtimeStatus !== 'live' ? 'Not connected right now -- this can take a few seconds after opening the app, or may mean your Firestore security rules are blocking access (Firebase console -> Firestore Database -> Rules)' : ''
+    note: realtimeStatus !== 'live' ? 'Not connected right now -- this can take a few seconds after opening the app, or may mean DATA_API_BASE is unreachable (check the URL and that data-api is uploaded to your Hostinger site)' : ''
   });
 
   if(btn){ btn.disabled = false; btn.textContent = '🧪 Test connection'; }
   const allOk = results.every(r => r.ok);
   const lines = results.map(r => `${r.ok ? '✅' : '❌'} ${r.step}${!r.ok && r.note ? '\n   ' + r.note : ''}`).join('\n');
-  alert((allOk ? '✅ All checks passed -- Firebase is working correctly on this device.\n\n' : '⚠ Some checks failed on this device:\n\n') + lines);
+  alert((allOk ? '✅ All checks passed -- the data API is working correctly on this device.\n\n' : '⚠ Some checks failed on this device:\n\n') + lines);
 }
 
+// One poll tick: lists every key, figures out which ones changed since this tab last saw
+// them, and routes each changed key through the same per-key handling the old onSnapshot
+// callback used to -- new/updated vehicles, bookings (plus the cancelled/extended
+// notification logic), legacy shared customers blob, and per-customer rows.
+async function pollAdminData(){
+  if(resetInProgress) return;
+  const items = await sbListPrefix('', 15000);
+  if(items === null){
+    realtimeStatus = 'down';
+    if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
+    return;
+  }
+  realtimeStatus = 'live';
+
+  if(!adminRealtimePolledOnce){
+    // First poll: just learn what's already there (same as Firestore's "skip the initial
+    // snapshot" handling) so nothing already-existing gets mistaken for brand new.
+    adminRealtimePolledOnce = true;
+    items.forEach(it => adminDataVersions.set(it.key, it.updated_at));
+    if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
+    return;
+  }
+
+  const changed = items.filter(it => adminDataVersions.get(it.key) !== it.updated_at);
+  if(!changed.length) return;
+  changed.forEach(it => adminDataVersions.set(it.key, it.updated_at));
+
+  changed.forEach(({ key, value }) => {
+    if(key === 'vehicles'){
+      if(!Array.isArray(value)) return;
+      VEHICLES = mergeById(VEHICLES, value, ['modifiedAt']);
+      if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
+
+    } else if(key === 'bookings'){
+      if(!Array.isArray(value)) return;
+      const localById = new Map(BOOKINGS.map(b => [b.id, b]));
+      const freshOnes = value.filter(b => !localById.has(b.id));
+      // Existing bookings that changed in a way worth a notification -- newly cancelled,
+      // or the drop-off date/time moved (an extension) -- not just brand-new ones.
+      const changedOnes = value.filter(b => {
+        const before = localById.get(b.id);
+        if(!before) return false;
+        const nowCancelled = b.cancelled && !before.cancelled;
+        const dropMoved = (b.dropDate !== before.dropDate || b.dropTime !== before.dropTime) && !b.cancelled;
+        return nowCancelled || dropMoved;
+      });
+      if(freshOnes.length || changedOnes.length){
+        BOOKINGS = mergeById(BOOKINGS, value, ['modifiedAt', 'agreedAt']);
+        freshOnes.forEach(notifyIfNewBooking);
+        changedOnes.forEach(b => {
+          const before = localById.get(b.id);
+          if(b.cancelled && !before.cancelled){
+            if(notifiedBookingCancelIds.has(b.id)) return;
+            notifiedBookingCancelIds.add(b.id);
+            notifyAdmin('Booking cancelled', `${bookingDisplayNumber(b.id)} — ${b.vehicleName} for ${b.customerName} was cancelled.`, 'admin');
+          } else {
+            const extKey = b.id + '|' + b.dropDate + b.dropTime;
+            if(notifiedBookingExtendIds.has(extKey)) return;
+            notifiedBookingExtendIds.add(extKey);
+            notifyAdmin('Booking extended', `${bookingDisplayNumber(b.id)} — ${b.vehicleName} for ${b.customerName} extended to ${fmtDate(b.dropDate)}, ${fmtTime(b.dropTime)}.`, 'admin');
+          }
+        });
+        if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
+      }
+
+    } else if(key === 'customers'){
+      // Legacy path: kept only for any data still under the old single-blob 'customers'
+      // key from before customers moved to individual rows below. New signups no longer
+      // write here at all.
+      if(!Array.isArray(value)) return;
+      const existingIds = new Set(CUSTOMERS.map(c => c.id));
+      const freshOnes = value.filter(c => !existingIds.has(c.id));
+      if(freshOnes.length){
+        CUSTOMERS = mergeById(CUSTOMERS, value, ['modifiedAt', 'createdAt']);
+        freshOnes.forEach(c => saveCustomerLocal(c));
+        freshOnes.forEach(notifyIfNewCustomer);
+        if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
+      }
+
+    } else if(key.indexOf(CUSTOMER_ROW_PREFIX) === 0){
+      // Real path for customers now that each one is its own row (key = 'customer_<id>').
+      const customer = value;
+      if(!customer || !customer.id) return;
+      const isNew = !CUSTOMERS.some(c => c.id === customer.id);
+      CUSTOMERS = mergeById(CUSTOMERS, [customer], ['modifiedAt', 'createdAt']);
+      saveCustomerLocal(customer);
+      if(isNew) notifyIfNewCustomer(customer);
+      if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
+    }
+  });
+}
+
+const ADMIN_POLL_INTERVAL_MS = 8000;
 async function subscribeAdminRealtime(){
   if(adminRealtimeChannel) return;
   const client = await getSupabase();
   if(!client) return;
-  try{
-    // Firestore's onSnapshot on the whole app_data collection delivers every doc's current
-    // state as its first callback (each one reported as an 'added' change, even though most
-    // already existed) -- so the very first snapshot is skipped for notification purposes
-    // (it would otherwise re-announce every existing booking/customer as brand new the
-    // moment this tab connects) while still using it to confirm the connection is live.
-    let firstSnapshot = true;
-    const unsub = client.db.collection('app_data').onSnapshot((snapshot) => {
-      realtimeStatus = 'live';
-      if(firstSnapshot){
-        firstSnapshot = false;
-        if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
-        return;
-      }
-      if(resetInProgress) return;
-      snapshot.docChanges().forEach((change) => {
-        if(change.type === 'removed') return;
-        const key = change.doc.id;
-        const data = change.doc.data();
-        const value = data && data.value;
-
-        if(key === 'vehicles'){
-          if(!Array.isArray(value)) return;
-          VEHICLES = mergeById(VEHICLES, value, ['modifiedAt']);
-          if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
-
-        } else if(key === 'bookings'){
-          if(!Array.isArray(value)) return;
-          const localById = new Map(BOOKINGS.map(b => [b.id, b]));
-          const freshOnes = value.filter(b => !localById.has(b.id));
-          // Existing bookings that changed in a way worth a notification -- newly cancelled,
-          // or the drop-off date/time moved (an extension) -- not just brand-new ones.
-          const changedOnes = value.filter(b => {
-            const before = localById.get(b.id);
-            if(!before) return false;
-            const nowCancelled = b.cancelled && !before.cancelled;
-            const dropMoved = (b.dropDate !== before.dropDate || b.dropTime !== before.dropTime) && !b.cancelled;
-            return nowCancelled || dropMoved;
-          });
-          if(freshOnes.length || changedOnes.length){
-            BOOKINGS = mergeById(BOOKINGS, value, ['modifiedAt', 'agreedAt']);
-            freshOnes.forEach(notifyIfNewBooking);
-            changedOnes.forEach(b => {
-              const before = localById.get(b.id);
-              if(b.cancelled && !before.cancelled){
-                if(notifiedBookingCancelIds.has(b.id)) return;
-                notifiedBookingCancelIds.add(b.id);
-                notifyAdmin('Booking cancelled', `${bookingDisplayNumber(b.id)} — ${b.vehicleName} for ${b.customerName} was cancelled.`, 'admin');
-              } else {
-                const extKey = b.id + '|' + b.dropDate + b.dropTime;
-                if(notifiedBookingExtendIds.has(extKey)) return;
-                notifiedBookingExtendIds.add(extKey);
-                notifyAdmin('Booking extended', `${bookingDisplayNumber(b.id)} — ${b.vehicleName} for ${b.customerName} extended to ${fmtDate(b.dropDate)}, ${fmtTime(b.dropTime)}.`, 'admin');
-              }
-            });
-            if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
-          }
-
-        } else if(key === 'customers'){
-          // Legacy path: kept only for any data still under the old single-blob 'customers'
-          // key from before customers moved to individual rows below. New signups no longer
-          // write here at all.
-          if(!Array.isArray(value)) return;
-          const existingIds = new Set(CUSTOMERS.map(c => c.id));
-          const freshOnes = value.filter(c => !existingIds.has(c.id));
-          if(freshOnes.length){
-            CUSTOMERS = mergeById(CUSTOMERS, value, ['modifiedAt', 'createdAt']);
-            freshOnes.forEach(c => saveCustomerLocal(c));
-            freshOnes.forEach(notifyIfNewCustomer);
-            if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
-          }
-
-        } else if(key.indexOf(CUSTOMER_ROW_PREFIX) === 0){
-          // Real path for customers now that each one is its own doc (id = 'customer_<id>').
-          const customer = value;
-          if(!customer || !customer.id) return;
-          const isNew = !CUSTOMERS.some(c => c.id === customer.id);
-          CUSTOMERS = mergeById(CUSTOMERS, [customer], ['modifiedAt', 'createdAt']);
-          saveCustomerLocal(customer);
-          if(isNew) notifyIfNewCustomer(customer);
-          if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
-        }
-      });
-    }, (err) => {
-      // Fires on a genuinely broken/denied connection (most often Firestore security
-      // rules blocking the read, or a background tab's connection dropping) -- same
-      // "not connected" meaning the old Supabase CLOSED/CHANNEL_ERROR/TIMED_OUT states had.
-      console.warn('Bike4u: admin realtime listener error:', err);
-      realtimeStatus = 'down';
-      if(state.isAdmin && state.page === 'admin' && !userIsActivelyEditing()) silentRefresh(render);
-    });
-    adminRealtimeChannel = { unsubscribe: unsub };
-  }catch(e){ console.warn('Bike4u: could not subscribe to realtime admin notifications:', e); realtimeStatus = 'down'; }
+  await pollAdminData();
+  const intervalId = setInterval(pollAdminData, ADMIN_POLL_INTERVAL_MS);
+  adminRealtimeChannel = { unsubscribe: () => clearInterval(intervalId) };
 }
 
-// Safety net for exactly the situation that keeps coming up: a device whose live
-// connection has gone quiet (most often a laptop tab left in the background) with no
-// periodic poll to fall back on. Rather than reintroducing a blind timer for everyone
-// (which was deliberately removed), this only ever syncs when the live connection is
-// confirmed *not* live on this specific device -- so a properly-connected device does
-// nothing extra, exactly as before, and only a stale one quietly catches itself up.
+// Safety net for exactly the situation that keeps coming up: a device whose polling has
+// gone quiet (most often a laptop tab left in the background, where browsers throttle
+// timers). This only ever does extra work when polling is confirmed *not* live on this
+// specific device -- so a properly-polling device does nothing extra, and only a stalled
+// one quietly catches itself up and restarts its own polling loop.
 function startRealtimeFallbackWatchdog(){
   setInterval(() => {
     if(!state.isAdmin || resetInProgress) return;
@@ -4207,9 +4109,9 @@ function startRealtimeFallbackWatchdog(){
       // Catch up on anything missed while not connected -- wrapped so this can never
       // cause a visible flicker if it happens to run while someone's looking at the screen.
       if(state.page === 'admin' && !userIsActivelyEditing()){ silentRefresh(syncFromSupabase); } else { syncFromSupabase(); }
-      // Also try to re-establish the live connection itself, not just patch over its
-      // absence forever -- a dropped connection can often reconnect cleanly once a
-      // background tab becomes active again or a network blip passes.
+      // Also try to re-establish polling itself, not just patch over its absence forever --
+      // a stalled interval can often recover cleanly once a background tab becomes active
+      // again or a network blip passes.
       if(adminRealtimeChannel){
         try{ adminRealtimeChannel.unsubscribe(); }catch(e){}
         adminRealtimeChannel = null;
@@ -4263,25 +4165,27 @@ function markNotificationRead(id){
 }
 
 let customerRealtimeChannel = null;
+let customerRealtimePolledOnce = false;
+const CUSTOMER_POLL_INTERVAL_MS = 10000;
+async function pollCustomerNotifications(){
+  const arr = await sbGet('notifications');
+  if(!customerRealtimePolledOnce){ customerRealtimePolledOnce = true; return; } // skip the initial "here's what's already there" callback, same reasoning as subscribeAdminRealtime above
+  if(!Array.isArray(arr)) return;
+  const existingIds = new Set(NOTIFICATIONS.map(n => n.id));
+  const freshOnes = arr.filter(n => !existingIds.has(n.id));
+  NOTIFICATIONS = arr;
+  freshOnes.forEach(notifyIfNewForCustomer);
+  if(state.currentCustomer && state.page === 'customer-account' && !userIsActivelyEditing()) silentRefresh(renderCustomerAccount);
+}
 async function subscribeCustomerRealtime(){
   if(customerRealtimeChannel) return;
   const client = await getSupabase();
   if(!client) return;
   try{
-    let first = true;
-    const unsub = client.db.collection('app_data').doc('notifications').onSnapshot((snap) => {
-      if(first){ first = false; return; } // skip the initial "here's what's already there" callback, same reasoning as subscribeAdminRealtime above
-      const data = snap.exists ? snap.data() : null;
-      const arr = data && data.value;
-      if(!Array.isArray(arr)) return;
-      const existingIds = new Set(NOTIFICATIONS.map(n => n.id));
-      const freshOnes = arr.filter(n => !existingIds.has(n.id));
-      NOTIFICATIONS = arr;
-      freshOnes.forEach(notifyIfNewForCustomer);
-      if(state.currentCustomer && state.page === 'customer-account' && !userIsActivelyEditing()) silentRefresh(renderCustomerAccount);
-    }, (err) => { console.warn('Bike4u: customer realtime listener error:', err); });
-    customerRealtimeChannel = { unsubscribe: unsub };
-  }catch(e){ console.warn('Bike4u: could not subscribe to realtime customer notifications:', e); }
+    await pollCustomerNotifications();
+    const intervalId = setInterval(pollCustomerNotifications, CUSTOMER_POLL_INTERVAL_MS);
+    customerRealtimeChannel = { unsubscribe: () => clearInterval(intervalId) };
+  }catch(e){ console.warn('Bike4u: could not subscribe to customer notification polling:', e); }
 }
 
 // Called any time a customer session becomes active (login, signup, session restore,
@@ -6738,17 +6642,16 @@ function openDocEditor(customerId, fieldKey){
   const c = CUSTOMERS.find(x => x.id === customerId);
   if(!c || !c[fieldKey]) return;
   const img = new Image();
-  // Most stored documents are by now a Firebase Storage URL, not a data: URL (they get
+  // Most stored documents are by now a storage-api URL, not a data: URL (they get
   // offloaded to Storage right after upload). Loading a cross-origin image WITHOUT this
   // flag lets it draw to the canvas fine (rotate/crop preview looks totally normal), but
   // permanently "taints" that canvas -- any later attempt to read pixels back out of it
   // (which is exactly what Save's toDataURL() call does) throws a SecurityError. That
   // throw happens before the modal closes or anything is saved, so Save looked like it
   // silently did nothing while Cancel (which never touches the canvas) worked fine.
-  // Firebase Storage's download URLs serve with CORS enabled for any origin, so
-  // requesting it in CORS mode here keeps the canvas "clean" and Save able to export it;
-  // the onerror fallback right below still covers it gracefully on the rare case that
-  // doesn't hold (e.g. an older file saved under custom bucket CORS settings).
+  // This only stays clean if the hosting serves these static files with CORS enabled for
+  // any origin; the onerror fallback right below still covers it gracefully if it doesn't
+  // (falls back to a tainted canvas and a clear warning on Save instead of a silent one).
   img.crossOrigin = 'anonymous';
   img.onload = () => {
     const base = document.createElement('canvas');
