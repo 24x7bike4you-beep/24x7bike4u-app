@@ -3076,12 +3076,17 @@ function compressAllStoredCustomerPhotos(btn){
   }
   let remaining = jobs.length;
   jobs.forEach(job => {
+    const customerId = job.c.id;
     compressDataUrl(job.c[job.f], 1280, 0.72, async result => {
-      job.c[job.f] = result;
+      job.c[job.f] = result; // instant preview on whatever object is currently rendered
       // Also try moving it out of the shared JSON blob entirely and into Storage -- this
       // is what actually relieves the pressure on future saves, not just this one photo.
-      const url = await uploadToStorage(`${job.c.id}/${job.f}-${Date.now()}.jpg`, dataUrlToBlob(result));
-      if(url) job.c[job.f] = url;
+      const url = await uploadToStorage(`${customerId}/${job.f}-${Date.now()}.jpg`, dataUrlToBlob(result));
+      // Re-find against the CURRENT CUSTOMERS array rather than reusing job.c -- a
+      // background poll can replace the whole array while this upload was in flight, which
+      // would otherwise silently save to a detached copy that's no longer live.
+      const c = CUSTOMERS.find(x => x.id === customerId);
+      if(c) c[job.f] = url || result;
       remaining--;
       if(remaining === 0){
         saveCustomers();
@@ -3369,14 +3374,20 @@ async function docCamUsePhoto(){
     renderCustomerSignup();
     uploadDraftPhoto(key, dataUrl);
   } else {
-    const c = CUSTOMERS.find(x => x.id === target.customerId);
-    if(c){
-      c[key] = dataUrl;
+    const cPreview = CUSTOMERS.find(x => x.id === target.customerId);
+    if(cPreview){
+      cPreview[key] = dataUrl;
       renderAdmin();
-      const url = await uploadToStorage(`${c.id}/${key}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
-      if(url) c[key] = url;
-      saveCustomers(c);
-      renderAdmin();
+      const url = await uploadToStorage(`${target.customerId}/${key}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
+      // Re-find rather than reusing the reference from before the await -- a background
+      // poll can replace the whole CUSTOMERS array while this upload was in flight, which
+      // would otherwise silently save to a detached copy that's no longer live.
+      const c = CUSTOMERS.find(x => x.id === target.customerId);
+      if(c){
+        c[key] = url || dataUrl;
+        saveCustomers(c);
+        renderAdmin();
+      }
     }
   }
 }
@@ -6620,12 +6631,17 @@ function adminReplaceCustomerDoc(id, key, input){
   if(!file) return;
   compressImageFile(file, 1280, 0.72, async dataUrl => {
     if(!dataUrl) return;
+    const cPreview = CUSTOMERS.find(x => x.id === id);
+    if(!cPreview) return;
+    cPreview[key] = dataUrl;
+    renderAdmin();
+    const url = await uploadToStorage(`${id}/${key}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
+    // Re-find rather than reusing the reference from before the await -- a background poll
+    // can replace the whole CUSTOMERS array while this upload was in flight, which would
+    // otherwise silently save to a detached copy that's no longer live.
     const c = CUSTOMERS.find(x => x.id === id);
     if(!c) return;
-    c[key] = dataUrl;
-    renderAdmin();
-    const url = await uploadToStorage(`${c.id}/${key}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
-    if(url) c[key] = url;
+    c[key] = url || dataUrl;
     saveCustomers(c);
     renderAdmin();
   });
@@ -6899,14 +6915,21 @@ async function docEditorSave(){
     }
     return;
   }
-  const c = CUSTOMERS.find(x => x.id === docEditor.customerId);
+  const customerId = docEditor.customerId;
+  const cPreview = CUSTOMERS.find(x => x.id === customerId);
   const fieldKey = docEditor.fieldKey;
   closeDocEditor();
   renderAdmin();
-  if(c){
-    c[fieldKey] = dataUrl;
-    const url = await uploadToStorage(`${c.id}/${fieldKey}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
-    if(url) c[fieldKey] = url;
+  if(cPreview){
+    cPreview[fieldKey] = dataUrl;
+    const url = await uploadToStorage(`${customerId}/${fieldKey}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
+    // Re-find rather than reusing the reference from before the await -- a background poll
+    // can replace the whole CUSTOMERS array while this upload was in flight, which would
+    // otherwise silently save to a detached copy that's no longer live (the same class of
+    // bug the modifiedAt bump below guards against on the *remote* side).
+    const c = CUSTOMERS.find(x => x.id === customerId);
+    if(!c) return;
+    c[fieldKey] = url || dataUrl;
     // Without this, a background sync landing moments later (its fetch may have started
     // before this save completed) sees an identical createdAt on both copies -- a tie
     // that the merge resolves in favor of the "remote" side -- silently reverting this
@@ -7185,12 +7208,19 @@ function uploadPhoto(id, input){
   if(!file) return;
   compressImageFile(file, 1000, 0.78, async dataUrl => {
     if(!dataUrl) return;
-    const v = VEHICLES.find(x => x.id === id);
-    if(!v) return;
-    v.photo = dataUrl; // instant preview while the upload is in flight
+    const vPreview = VEHICLES.find(x => x.id === id);
+    if(!vPreview) return;
+    vPreview.photo = dataUrl; // instant preview while the upload is in flight
     renderAdmin();
     const url = await uploadToStorage(`vehicle/${id}-${Date.now()}.jpg`, dataUrlToBlob(dataUrl));
-    if(url) v.photo = url;
+    // Re-find the vehicle rather than reusing the reference from before the await: the
+    // background poll can replace the whole VEHICLES array while the upload was in flight,
+    // which would otherwise leave this edit writing to a detached copy that's no longer
+    // part of the live array -- the save would still "succeed" but the photo would never
+    // actually show up, which is exactly the bug this fixes.
+    const v = VEHICLES.find(x => x.id === id);
+    if(!v) return;
+    v.photo = url || dataUrl;
     saveVehicles(v);
     renderAdmin();
   });
@@ -7207,8 +7237,19 @@ function offloadStoredVehiclePhotos(btn){
   if(btn){ btn.disabled = true; btn.textContent = 'Offloading…'; }
   Promise.all(jobs.map(async v => {
     const url = await uploadToStorage(`vehicle/${v.id}-${Date.now()}.jpg`, dataUrlToBlob(v.photo));
-    if(url){ v.photo = url; v.modifiedAt = new Date().toISOString(); }
-  })).then(() => {
+    return { id: v.id, url };
+  })).then(results => {
+    // Re-find each vehicle by id against the CURRENT VEHICLES array rather than reusing the
+    // `jobs` references captured before these awaits -- a background poll can replace the
+    // whole array while uploads were in flight, which would otherwise leave this writing to
+    // detached copies that are no longer part of the live array.
+    results.forEach(({ id, url }) => {
+      if(!url) return;
+      const v = VEHICLES.find(x => x.id === id);
+      if(!v) return;
+      v.photo = url;
+      v.modifiedAt = new Date().toISOString();
+    });
     if(btn){ btn.disabled = false; btn.textContent = '🗜 Offload photos'; }
     sbSet('vehicles', VEHICLES);
     renderAdmin();
